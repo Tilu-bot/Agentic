@@ -100,9 +100,7 @@ class MemoryLattice:
         with self._lock:
             self._fluid.append(entry)
             if len(self._fluid) > self._fluid_limit:
-                overflow = self._fluid[: self._fluid_limit // 2]
-                self._fluid = self._fluid[self._fluid_limit // 2 :]
-                self._crystallize(overflow)
+                self._evict_to_crystal()
 
     def fluid_read(self) -> list[FluidEntry]:
         with self._lock:
@@ -113,6 +111,42 @@ class MemoryLattice:
             if self._fluid:
                 self._crystallize(self._fluid)
             self._fluid = []
+
+    def _evict_to_crystal(self) -> None:
+        """
+        Evict the least-valuable half of the fluid window to the Crystal tier.
+
+        Rather than always discarding the *oldest* entries (pure FIFO), each
+        entry is ranked by a combined keep-score that balances recency with
+        importance.  Recent *and* high-importance entries are retained; old
+        *and* low-importance ones are crystallised first.
+
+        keep_score = 0.6 × recency_rank + 0.4 × importance_score
+
+        where recency_rank is 0.0 for the oldest entry and 1.0 for the newest.
+        This means a very important old turn is kept over a trivial recent one,
+        but recency still outweighs importance 60/40 so the conversational flow
+        is preserved.
+        """
+        n = len(self._fluid)
+        evict_count = n - (self._fluid_limit // 2)
+        if evict_count <= 0:
+            return
+
+        scored: list[tuple[float, int, FluidEntry]] = []
+        for i, entry in enumerate(self._fluid):
+            recency    = i / max(n - 1, 1)          # 0 = oldest, 1 = newest
+            importance = _score_importance([entry])  # 0.0 – 1.0
+            keep_score = 0.6 * recency + 0.4 * importance
+            scored.append((keep_score, i, entry))
+
+        # Sort ascending: lowest keep_score → evicted first
+        scored.sort(key=lambda x: x[0])
+        evict_set = {idx for _, idx, _ in scored[:evict_count]}
+
+        to_evict   = [e for i, e in enumerate(self._fluid) if i in evict_set]
+        self._fluid = [e for i, e in enumerate(self._fluid) if i not in evict_set]
+        self._crystallize(to_evict)
 
     # ------------------------------------------------------------------
     # CRYSTAL tier – compressed episodic records
@@ -180,15 +214,30 @@ class MemoryLattice:
         self,
         include_crystal: int = 5,
         include_bedrock: int = 10,
+        query: str = "",
     ) -> str:
         """
         Build a text block summarising relevant memory for the next
         deliberation cycle.
+
+        When *query* is provided, Bedrock facts are ranked by keyword-overlap
+        relevance to the query rather than purely by recency.  A larger
+        candidate pool (2× include_bedrock) is fetched and then trimmed after
+        scoring, so the most contextually pertinent facts appear in the prompt.
         """
         parts: list[str] = []
 
-        bedrock_facts = self.bedrock_query(limit=include_bedrock)
+        # Fetch a larger pool when relevance ranking is active so the top-k
+        # slice is chosen from a meaningful distribution.
+        candidate_limit = include_bedrock * 2 if query else include_bedrock
+        bedrock_facts = self.bedrock_query(limit=candidate_limit)
         if bedrock_facts:
+            if query:
+                bedrock_facts = sorted(
+                    bedrock_facts,
+                    key=lambda f: _score_relevance(query, f.text),
+                    reverse=True,
+                )[:include_bedrock]
             parts.append("=== Known Facts ===")
             for f in bedrock_facts:
                 parts.append(f"[{f.category}] {f.text}")
@@ -293,3 +342,35 @@ def _score_importance(entries: list[FluidEntry]) -> float:
         score += 0.05
 
     return min(1.0, score)
+
+
+def _score_relevance(query: str, text: str) -> float:
+    """
+    Keyword-overlap relevance score between *query* and a memory *text*.
+
+    Returns a float in [0.0, 1.0] where 1.0 means every meaningful query
+    word appears in the text.  Common stopwords are ignored so that short
+    but precise queries ("user's name?") are scored faithfully.
+
+    This is intentionally lightweight (no embeddings, no ML) so it adds
+    zero latency to the deliberation cycle.  For the Bedrock tier – which
+    typically contains O(100) short facts – linear scanning is negligible.
+    """
+    _STOPWORDS: frozenset[str] = frozenset({
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her",
+        "to", "of", "and", "or", "in", "for", "with", "that", "this",
+        "at", "by", "from", "on", "as", "but", "not", "what", "how",
+        "do", "does", "did", "can", "could", "will", "would", "should",
+    })
+    if not query or not text:
+        return 0.0
+
+    def _words(s: str) -> set[str]:
+        return {w.lower().strip(".,!?;:\"'()[]{}") for w in s.split()} - _STOPWORDS
+
+    q_words = _words(query)
+    if not q_words:
+        return 0.0
+    t_words = _words(text)
+    return len(q_words & t_words) / len(q_words)

@@ -3,15 +3,22 @@ Agentic - Cortex
 ================
 The central reasoning unit of the Reactive Cortex Architecture (RCA).
 
-The Cortex drives the *Deliberation Pulse*:
+The Cortex drives the *Deliberation Pulse* using a ReAct loop
+(Reason → Act → Observe → Reason … → Final Answer):
+
   1. Receive user input via the Signal Lattice.
-  2. Assemble context from the Memory Lattice.
-  3. Call ModelNexus to stream a response.
-  4. While streaming, watch for @@SKILL:...@@ markers.
-  5. Dispatch skill invocations to SkillRegistry via TaskFibers.
-  6. Inject skill results back into the response stream.
-  7. Write the completed exchange to the Memory Lattice.
-  8. Emit DELIBERATION_END signal with the full response.
+  2. Assemble context from the Memory Lattice (query-relevance ranked).
+  3. Build system prompt and initial message list.
+  4. Resolve tool schema (native calling for supported models).
+  5. Loop up to react_max_iterations times:
+       a. Stream a model response.
+       b. Extract any skill-call markers from the response.
+       c. If none → Final Answer.  Break.
+       d. Run skill invocations in parallel via TaskFibers (Act).
+       e. Build an Observation message from results (Observe).
+       f. Append assistant turn + observation to message history, loop.
+  6. Write final answer to the Memory Lattice.
+  7. Emit DELIBERATION_END signal with the full response.
 
 Thread model:
   The Cortex runs its async event loop in a dedicated background thread.
@@ -28,15 +35,12 @@ from core.memory_lattice import MemoryLattice
 from core.signal_lattice import SigKind, Signal, lattice
 from core.skill_registry import SkillRegistry
 from core.task_fabric import FiberStatus, TaskFabric, TaskFiber
-from model.gemma_nexus import GemmaNexus
+from model.gemma_nexus import GemmaNexus, get_assistant_role
 from model.prompt_weaver import PromptWeaver, SkillInvocation
 from utils.config import cfg
 from utils.logger import build_logger
 
 log = build_logger("agentic.cortex")
-
-# How many characters to buffer before scanning for skill markers
-_SCAN_BUFFER_CHARS = 50
 
 
 class Cortex:
@@ -139,104 +143,168 @@ class Cortex:
             self._deliberating = False
 
     async def _deliberate_inner(self, user_text: str) -> None:
-        """Performs the actual deliberation once the busy guard has been acquired."""
+        """
+        ReAct deliberation loop: Reason → Act → Observe → Reason … → Answer.
+
+        Each iteration:
+          1. Stream a model response.
+          2. Extract any skill-call markers from that response.
+          3. If skill calls are found → run them in parallel (Act), build an
+             Observation message from the results, append both turns to the
+             conversation, and loop (Reason again with new context).
+          4. If no skill calls are found → this is the Final Answer.  Stop.
+
+        The loop is bounded by ``react_max_iterations`` (default 6) to prevent
+        runaway execution.  The final answer (last iteration's response) is
+        written to the Memory Lattice and broadcast via DELIBERATION_END.
+        """
         log.info("Deliberation pulse: '%s'", user_text[:80])
 
-        # 1. Write user input to fluid memory
+        # ── 1. Write user input to fluid memory ─────────────────────────
         self._memory.fluid_write("user", user_text)
 
-        # 2. Assemble context from memory tiers
+        # ── 2. Assemble context, ranked by query relevance ───────────────
         mem_ctx = self._memory.assemble_context(
-            include_crystal=5, include_bedrock=10
+            include_crystal=5, include_bedrock=10, query=user_text
         )
 
-        # 3. Build system prompt and message list
+        # ── 3. Build initial system prompt + message list ────────────────
         system_prompt = self._weaver.build_system(memory_context=mem_ctx)
         fluid         = self._memory.fluid_read()
         messages      = self._weaver.build_messages(fluid[:-1], user_text)
 
-        # 4. Stream response from Gemma
-        response_parts: list[str] = []
-        skill_queue: list[SkillInvocation] = []
-        scan_buf = ""
+        # ── 4. Resolve tool schema for models that support native calling ─
+        tools: list[dict] | None = (
+            self._registry.tools_schema()
+            if self._nexus.tool_calls_supported
+            else None
+        )
 
-        try:
-            async for token in self._nexus.stream(
-                messages,
-                system=system_prompt,
-                temperature=0.7,
-                max_tokens=2048,
-            ):
-                response_parts.append(token)
-                scan_buf += token
+        max_iterations = cfg.get("react_max_iterations", 6)
+        final_response = ""
+        total_skills_used = 0
 
-                # Stream token to UI
-                if self._on_token:
-                    try:
-                        self._on_token(token)
-                    except Exception:
-                        pass
-
-                # Scan accumulated buffer for skill calls
-                if len(scan_buf) >= _SCAN_BUFFER_CHARS:
-                    calls = self._weaver.extract_skill_calls(scan_buf)
-                    skill_queue.extend(calls)
-                    scan_buf = ""
-
-        except Exception as exc:
-            log.exception("Model stream failed: %s", exc)
-            err_msg = f"\n[Model error: {exc}]"
-            if self._on_token:
-                self._on_token(err_msg)
-            response_parts.append(err_msg)
-
-        # Check remainder of buffer
-        if scan_buf:
-            calls = self._weaver.extract_skill_calls(scan_buf)
-            skill_queue.extend(calls)
-
-        full_response = "".join(response_parts)
-
-        # 5. Execute skill invocations as Task Fibers
-        if skill_queue:
-            full_response = await self._dispatch_skills(
-                skill_queue, full_response
+        # ── 5. ReAct loop ────────────────────────────────────────────────
+        for iteration in range(max_iterations):
+            log.info(
+                "ReAct iteration %d/%d for '%s'",
+                iteration + 1, max_iterations, user_text[:40],
             )
 
-        # 6. Write assistant response to fluid memory
-        self._memory.fluid_write("assistant", full_response)
+            # Stream one model response
+            response_parts: list[str] = []
+            scan_buf = ""
 
-        # 7. Signal completion
+            try:
+                async for token in self._nexus.stream(
+                    messages,
+                    system=system_prompt,
+                    temperature=0.7,
+                    max_tokens=2048,
+                    tools_schema=tools,
+                ):
+                    response_parts.append(token)
+                    scan_buf += token
+
+                    if self._on_token:
+                        try:
+                            self._on_token(token)
+                        except Exception:
+                            pass
+
+            except Exception as exc:
+                log.exception("Model stream failed: %s", exc)
+                err_msg = f"\n[Model error: {exc}]"
+                if self._on_token:
+                    self._on_token(err_msg)
+                response_parts.append(err_msg)
+
+            full_response = "".join(response_parts)
+            final_response = full_response
+
+            # Extract skill calls from the entire iteration response
+            skill_queue = self._weaver.extract_skill_calls(full_response)
+
+            if not skill_queue:
+                # No tool calls → final answer reached
+                log.info(
+                    "ReAct: no tool calls in iteration %d – final answer",
+                    iteration + 1,
+                )
+                break
+
+            # ── Act: run skill fibers in parallel ────────────────────────
+            results = await self._run_skills(skill_queue)
+            total_skills_used += len(skill_queue)
+
+            lattice.emit_kind(
+                SigKind.REACT_ITERATION,
+                {
+                    "iteration":   iteration + 1,
+                    "skills_run":  [inv.skill_name for inv in skill_queue],
+                    "result_count": len(results),
+                },
+                source="cortex",
+            )
+            log.info(
+                "ReAct iteration %d: ran %d skills",
+                iteration + 1, len(skill_queue),
+            )
+
+            # Notify the streaming UI that tools have been executed and the
+            # model is about to continue reasoning.
+            if self._on_token and iteration + 1 < max_iterations:
+                skill_names = ", ".join(inv.skill_name for inv in skill_queue)
+                try:
+                    self._on_token(
+                        f"\n\n[⚙ Skills executed: {skill_names} — reasoning continues…]\n\n"
+                    )
+                except Exception:
+                    pass
+
+            # ── Observe: append tool call + observation to message history ─
+            asst_role = get_assistant_role(cfg.get("model_id", ""))
+            messages.append({"role": asst_role, "content": full_response})
+            obs_text = self._weaver.format_observations(results)
+            messages.append({"role": "user", "content": obs_text})
+
+        else:
+            log.warning("ReAct: reached max iterations (%d)", max_iterations)
+
+        # ── 6. Write final answer to fluid memory ────────────────────────
+        self._memory.fluid_write("assistant", final_response)
+
+        # ── 7. Signal deliberation complete ──────────────────────────────
         lattice.emit_kind(
             SigKind.DELIBERATION_END,
-            {"response": full_response, "skills_used": len(skill_queue)},
+            {"response": final_response, "skills_used": total_skills_used},
             source="cortex",
         )
         log.info(
             "Deliberation complete (%d skills, %d chars)",
-            len(skill_queue), len(full_response),
+            total_skills_used, len(final_response),
         )
 
     # ------------------------------------------------------------------
-    # Skill dispatch
+    # Skill execution primitive
     # ------------------------------------------------------------------
 
-    async def _dispatch_skills(
+    async def _run_skills(
         self,
         invocations: list[SkillInvocation],
-        response: str,
-    ) -> str:
+    ) -> list[tuple[SkillInvocation, str, bool]]:
         """
-        Execute skill calls as Task Fibers and inject their results into the
-        response text.
+        Execute skill calls as parallel Task Fibers and return structured results.
 
-        Each invocation gets its own fiber.  We store the fiber_id returned by
-        add_fiber() and look up results by ID after run_until_empty() completes,
-        rather than scanning by label.  Label-based lookup was fragile because
-        two invocations of the same skill would share a label and the first
-        matching fiber (potentially the wrong one) would be used for both.
+        Each invocation gets its own fiber.  All fibers are enqueued and then
+        run_until_empty() drives them to completion concurrently (up to
+        max_concurrent from the TaskFabric configuration).
+
+        Returns a list of ``(invocation, result_str, success)`` tuples in the
+        same order as *invocations*.  This is consumed by
+        ``PromptWeaver.format_observations`` to build the Observation turn for
+        the next ReAct iteration.
         """
-        # Map fiber_id → its SkillInvocation so we can match results precisely
         id_to_inv: dict[str, SkillInvocation] = {}
         for inv in invocations:
             fiber = TaskFiber(
@@ -249,21 +317,21 @@ class Cortex:
 
         await self._fabric.run_until_empty()
 
+        results: list[tuple[SkillInvocation, str, bool]] = []
         for fid, inv in id_to_inv.items():
             fiber = self._fabric.get_fiber(fid)
             if fiber is None:
+                results.append((inv, "ERROR: fiber not found", False))
                 continue
             if fiber.status == FiberStatus.DONE:
-                result_str = str(fiber.result)[:1000]
-                response = self._weaver.inject_skill_result(
-                    response, inv, result_str
-                )
+                results.append((inv, str(fiber.result)[:1000], True))
             elif fiber.status == FiberStatus.FAILED:
-                response = self._weaver.inject_skill_result(
-                    response, inv, f"ERROR: {fiber.error}"
+                results.append((inv, f"ERROR: {fiber.error}", False))
+            else:
+                results.append(
+                    (inv, f"ERROR: unexpected fiber state {fiber.status}", False)
                 )
-
-        return response
+        return results
 
     def _make_skill_fn(self, inv: SkillInvocation):
         async def _fn(fiber: TaskFiber):

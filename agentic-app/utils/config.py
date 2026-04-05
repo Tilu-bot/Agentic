@@ -26,6 +26,11 @@ _DEFAULT: dict[str, Any] = {
     "streaming_enabled": True,
     "skill_timeout_s": 30,
     "log_level": "INFO",
+    # ReAct loop: maximum reasoning–action iterations per deliberation pulse.
+    # Each iteration generates a response, runs any requested skills, and feeds
+    # results back to the model before the next iteration.  6 covers most
+    # multi-step tasks while preventing runaway loops.
+    "react_max_iterations": 6,
 }
 
 

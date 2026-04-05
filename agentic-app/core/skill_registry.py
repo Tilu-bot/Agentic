@@ -124,6 +124,32 @@ class SkillRegistry:
                 )
         return "\n".join(lines)
 
+    def tools_schema(self) -> list[dict]:
+        """
+        Return an OpenAI-format tool schema list for all registered skills.
+
+        This is passed to ``tokenizer.apply_chat_template(tools=...)`` for
+        models that support native function/tool calling (Llama 3.1+, Qwen 2.5,
+        Phi-4, Mistral-Nemo).  The schema follows the JSON-Schema ``object``
+        format expected by the HuggingFace chat-template tool-use extension.
+        """
+        schemas: list[dict] = []
+        with self._lock:
+            for spec in self._skills.values():
+                schemas.append({
+                    "type": "function",
+                    "function": {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "parameters": {
+                            "type": "object",
+                            "properties": spec.parameters,
+                            "required": spec.required,
+                        },
+                    },
+                })
+        return schemas
+
     # ------------------------------------------------------------------
     # Invocation
     # ------------------------------------------------------------------

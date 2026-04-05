@@ -109,7 +109,34 @@ def get_assistant_role(model_id: str) -> str:
     return "model" if "gemma" in model_id.lower() else "assistant"
 
 
-def _supports_system_role(tokenizer: Any) -> bool:
+def _supports_tool_calls(tokenizer: Any) -> bool:
+    """
+    Probe whether the tokenizer's chat template supports native tool/function
+    calling (Llama 3.1+, Qwen 2.5, Phi-4, Mistral-Nemo, …).
+
+    Renders a minimal one-tool, one-user-message conversation through the
+    template and checks that it succeeds without raising.  When the template
+    does not know about the ``tools`` parameter it raises a Jinja2 error.
+
+    This check runs exactly once at load time, so overhead is negligible.
+    """
+    try:
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "probe",
+                "description": "probe",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        probe_msgs = [{"role": "user", "content": "hi"}]
+        tokenizer.apply_chat_template(probe_msgs, tools=[tool], tokenize=False)
+        return True
+    except Exception:
+        return False
+
+
+
     """
     Probe the tokenizer's chat template for native 'system' role support.
 
@@ -170,6 +197,11 @@ class ModelNexus:
         # Set to True at load time when the tokenizer supports a native "system" role.
         # When False, the system prompt is embedded as a leading user/assistant exchange.
         self._system_role_supported: bool = False
+        # Set to True at load time when the tokenizer supports native tool/function
+        # calling via the apply_chat_template(tools=...) parameter.  When True,
+        # the Cortex passes the tool schema directly to the model instead of
+        # relying solely on the text-based @@SKILL:...@@ prompt markers.
+        self._tool_calls_supported: bool = False
 
     # ------------------------------------------------------------------
     # Lazy model loading
@@ -213,6 +245,10 @@ class ModelNexus:
         # and saves significant context tokens on every request.
         system_role_ok = _supports_system_role(tokenizer)
         log.info("Model %s native system role: %s", model_id, system_role_ok)
+
+        # Probe for native tool/function calling support (Llama 3.1+, Qwen 2.5, …)
+        tool_calls_ok = _supports_tool_calls(tokenizer)
+        log.info("Model %s native tool calling: %s", model_id, tool_calls_ok)
 
         load_kw: dict = {
             "token": hf_token,
@@ -275,6 +311,7 @@ class ModelNexus:
         self._model     = model
         self._model_id  = model_id
         self._system_role_supported = system_role_ok
+        self._tool_calls_supported  = tool_calls_ok
         log.info("Model ready: %s", model_id)
 
     # ------------------------------------------------------------------
@@ -283,6 +320,11 @@ class ModelNexus:
 
     def is_loaded(self) -> bool:
         return self._model is not None
+
+    @property
+    def tool_calls_supported(self) -> bool:
+        """True when the loaded model's tokenizer supports native tool calling."""
+        return self._tool_calls_supported
 
     def list_models(self) -> list[str]:
         return list(KNOWN_MODELS)
@@ -303,6 +345,7 @@ class ModelNexus:
         system: str = "",
         temperature: float = 0.7,
         max_tokens: int = 2048,
+        tools_schema: list[dict] | None = None,
     ) -> AsyncIterator[str]:
         """
         Async generator yielding generated token strings one at a time.
@@ -312,10 +355,15 @@ class ModelNexus:
         generation thread to the async caller via an asyncio.Queue.
 
         Args:
-            messages:    List of {"role": "...", "content": "..."} dicts.
-            system:      System prompt text (prepended to conversation).
-            temperature: Sampling temperature (0 = greedy decode).
-            max_tokens:  Maximum new tokens to generate.
+            messages:     List of {"role": "...", "content": "..."} dicts.
+            system:       System prompt text (prepended to conversation).
+            temperature:  Sampling temperature (0 = greedy decode).
+            max_tokens:   Maximum new tokens to generate.
+            tools_schema: Optional OpenAI-format tool schema list.  When the
+                          loaded model's tokenizer supports native tool calling
+                          (detected at load time) and this list is non-empty,
+                          it is passed as ``tools=`` to ``apply_chat_template``
+                          so the model produces structured tool-call output.
         """
         # Force a reload if the user changed the model in Settings.
         if cfg.get("model_id", "google/gemma-3-1b-it") != self._model_id:
@@ -357,6 +405,9 @@ class ModelNexus:
             full_messages,
             add_generation_prompt=True,
             return_tensors="pt",
+            **({"tools": tools_schema}
+               if tools_schema and self._tool_calls_supported
+               else {}),
         )
 
         device     = next(model.parameters()).device
@@ -469,10 +520,13 @@ class ModelNexus:
         system: str = "",
         temperature: float = 0.7,
         max_tokens: int = 2048,
+        tools_schema: list[dict] | None = None,
     ) -> NexusResponse:
         """Collect the full response as a single NexusResponse."""
         parts: list[str] = []
-        async for token in self.stream(messages, system, temperature, max_tokens):
+        async for token in self.stream(
+            messages, system, temperature, max_tokens, tools_schema
+        ):
             parts.append(token)
         return NexusResponse(text="".join(parts), model=self._model_id)
 
