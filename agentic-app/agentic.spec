@@ -3,7 +3,7 @@
 PyInstaller build specification for the Agentic desktop app.
 
 Usage:
-    pip install pyinstaller httpx
+    pip install pyinstaller transformers torch accelerate httpx huggingface_hub
     cd agentic-app
     pyinstaller agentic.spec
 
@@ -61,7 +61,16 @@ a = Analysis(
         "tkinter",
         "tkinter.ttk",
         "tkinter.scrolledtext",
-        # httpx dependencies
+        # HuggingFace / PyTorch
+        "transformers",
+        "transformers.models.gemma",
+        "transformers.models.gemma2",
+        "transformers.generation",
+        "transformers.generation.streamers",
+        "torch",
+        "accelerate",
+        "huggingface_hub",
+        # httpx (web-fetch skill)
         "httpx",
         "httpcore",
         "anyio",
@@ -75,8 +84,8 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         # Exclude heavy unused packages
-        "matplotlib", "numpy", "pandas", "scipy",
-        "PIL", "cv2", "torch", "tensorflow",
+        "matplotlib", "pandas", "scipy",
+        "PIL", "cv2", "tensorflow",
         "IPython", "notebook", "jupyter",
     ],
     win_no_prefer_redirects=False,

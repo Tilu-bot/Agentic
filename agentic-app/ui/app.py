@@ -110,7 +110,6 @@ class AgenticApp(tk.Tk):
             muted=True, size=FONTS.size_xs,
             bg=pal.bg_deep,
         ).pack()
-
         div = tk.Frame(self._sidebar, bg=pal.border, height=1)
         div.pack(fill="x", pady=(M.padding_sm, M.padding_md))
 
@@ -136,7 +135,7 @@ class AgenticApp(tk.Tk):
         div2.pack(fill="x", side="bottom", pady=M.padding_sm)
         AgLabel(
             self._sidebar, pal,
-            text="v1.0  •  Gemma via Ollama",
+            text="v1.0  •  Gemma · HuggingFace",
             muted=True, size=FONTS.size_xs,
             bg=pal.bg_deep,
         ).pack(side="bottom", pady=M.padding_xs)
@@ -199,8 +198,9 @@ class AgenticApp(tk.Tk):
         log.info("Agentic bootstrap complete")
         self._chat_view.append_system(
             "Welcome to Agentic! Powered by the Reactive Cortex Architecture.\n"
-            "Type a message to start. Make sure Ollama is running with the Gemma model.\n"
-            "  → Check Settings to configure your Ollama URL and model name."
+            "Type a message to start. Gemma runs locally via HuggingFace transformers.\n"
+            "  → The model is downloaded automatically on first use.\n"
+            "  → Go to Settings to choose a model and device."
         )
 
     # ------------------------------------------------------------------

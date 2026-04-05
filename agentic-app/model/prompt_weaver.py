@@ -59,7 +59,7 @@ class SkillInvocation:
 
 
 class PromptWeaver:
-    """Builds Ollama-compatible message lists from session context."""
+    """Builds message lists for the Gemma chat template from session context."""
 
     def __init__(self, skills_manifest: str) -> None:
         self._skills_manifest = skills_manifest
@@ -79,8 +79,9 @@ class PromptWeaver:
         user_input: str,
     ) -> list[dict]:
         """
-        Convert fluid memory entries + new user input into an Ollama
+        Convert fluid memory entries + new user input into a Gemma chat
         message list (role / content pairs).
+        Gemma uses "user" and "model" roles.
         """
         messages: list[dict] = []
 
@@ -116,10 +117,11 @@ class PromptWeaver:
 
 
 def _map_role(role: str) -> str | None:
+    # Gemma instruction models use "user" and "model" as turn roles.
     mapping = {
-        "user": "user",
-        "assistant": "assistant",
-        "system": "system",
-        "skill": "assistant",   # skill results become part of assistant context
+        "user":      "user",
+        "assistant": "model",
+        "system":    "user",    # system turns are encoded as user turns
+        "skill":     "model",   # skill results become part of model context
     }
     return mapping.get(role.lower())

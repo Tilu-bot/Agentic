@@ -15,8 +15,10 @@ from utils.logger import build_logger
 log = build_logger("agentic.config")
 
 _DEFAULT: dict[str, Any] = {
-    "ollama_base_url": "http://localhost:11434",
-    "gemma_model": "gemma3:4b",
+    "model_id": "google/gemma-3-1b-it",
+    "hf_token": "",
+    "device": "auto",
+    "quantize_4bit": False,
     "theme": "dark",
     "font_size": 13,
     "max_parallel_tasks": 4,

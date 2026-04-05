@@ -1,6 +1,6 @@
 # Agentic
 
-**Agentic** is a multi-task AI desktop application built on the original **Reactive Cortex Architecture (RCA)** – a novel agent design that uses signal-driven cognitive cycles, a three-tier memory lattice, and a parallel task fabric to orchestrate the open-source **Gemma** model via Ollama.
+**Agentic** is a multi-task AI desktop application built on the original **Reactive Cortex Architecture (RCA)** – a novel agent design that uses signal-driven cognitive cycles, a three-tier memory lattice, and a parallel task fabric to orchestrate the open-source **Gemma** model running entirely in-process via HuggingFace `transformers`.
 
 > ⚠️ This is original software. All architecture, code, and design were created from scratch after studying the landscape of existing agentic systems. No code was copied from any other project.
 
@@ -13,7 +13,7 @@
 | **Reactive Cortex Architecture** | Signal-driven cognitive cycles – no polling loops |
 | **Task Fabric** | Parallel execution of agent sub-tasks with dependency tracking |
 | **Three-Tier Memory Lattice** | Fluid (working) → Crystal (episodic) → Bedrock (semantic facts) |
-| **Gemma via Ollama** | Runs 100% locally, no API keys required |
+| **Gemma via HuggingFace** | Runs 100% locally, no API keys, no server required |
 | **Streaming responses** | Token-by-token display with live progress |
 | **Built-in Skills** | File I/O, web fetching, Python code execution, memory ops |
 | **Desktop App** | Native window (tkinter), packaged with PyInstaller – no browser needed |
@@ -56,9 +56,9 @@ User Input
   • BEDROCK → semantic facts (SQLite)
 
 [Gemma Nexus]
-  → Ollama HTTP streaming API
-  → Auto-retry on transient errors
-  → Token budget tracking
+  → HuggingFace transformers (runs in-process)
+  → TextIteratorStreamer for async token delivery
+  → Lazy model load with in-memory caching
 ```
 
 ### Component Glossary
@@ -70,7 +70,7 @@ User Input
 | **TaskFabric** | Manages TaskFibers (parallel sub-tasks) |
 | **MemoryLattice** | Three-tier memory: Fluid / Crystal / Bedrock |
 | **SkillRegistry** | Self-describing tool/skill catalogue |
-| **GemmaNexus** | Async streaming adapter for Ollama API |
+| **GemmaNexus** | Direct HuggingFace transformers inference; TextIteratorStreamer for async tokens |
 | **PromptWeaver** | Assembles system + history prompts dynamically |
 
 ---
@@ -80,13 +80,7 @@ User Input
 ### 1. Prerequisites
 
 - **Python 3.11+**
-- **Ollama** – [https://ollama.com](https://ollama.com) (free, local LLM server)
-- **Gemma model** pulled in Ollama
-
-```bash
-# Install Ollama then pull a Gemma model
-ollama pull gemma3:4b
-```
+- No external server needed – the model runs directly in Python.
 
 ### 2. Install dependencies
 
@@ -95,11 +89,18 @@ cd agentic-app
 pip install -r requirements.txt
 ```
 
+> **GPU (recommended for larger models):** install PyTorch with CUDA support from
+> [https://pytorch.org/get-started/locally](https://pytorch.org/get-started/locally).
+> On CPU, use `google/gemma-3-1b-it` for acceptable speed.
+
 ### 3. Run the app
 
 ```bash
 python main.py
 ```
+
+On first launch the selected model is downloaded automatically from HuggingFace
+Hub and cached in `~/.cache/huggingface/`.  Subsequent launches are instant.
 
 ---
 
@@ -112,7 +113,7 @@ desktop application – no Python installation required on the end-user's machin
 
 ```bash
 cd agentic-app
-pip install pyinstaller httpx
+pip install pyinstaller transformers torch accelerate httpx huggingface_hub
 pyinstaller agentic.spec
 ```
 
@@ -150,7 +151,7 @@ agentic-app/
 │   └── skill_registry.py     # Skill/tool catalogue
 │
 ├── model/                    # Model integration
-│   ├── gemma_nexus.py        # Gemma via Ollama (streaming)
+│   ├── gemma_nexus.py        # Gemma via HuggingFace transformers (streaming)
 │   └── prompt_weaver.py      # Dynamic prompt construction
 │
 ├── skills/                   # Built-in skills
@@ -209,8 +210,10 @@ Settings are stored in `~/.agentic/config.json`. You can edit them in the
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `ollama_base_url` | `http://localhost:11434` | Ollama server URL |
-| `gemma_model` | `gemma3:4b` | Model name (any Gemma variant) |
+| `model_id` | `google/gemma-3-1b-it` | HuggingFace model ID |
+| `hf_token` | `` | HuggingFace token (for gated models) |
+| `device` | `auto` | `auto` / `cpu` / `cuda` / `mps` |
+| `quantize_4bit` | `false` | 4-bit quantization (GPU + bitsandbytes) |
 | `working_memory_limit` | 20 | Fluid memory window (turns) |
 | `max_parallel_tasks` | 4 | Concurrent TaskFibers |
 | `theme` | `dark` | UI theme: `dark` or `light` |
@@ -245,8 +248,8 @@ class WeatherSkill(SkillBase):
 
 ## 🔒 Privacy & Security
 
-- All data stays **100% local** – Gemma runs via Ollama on your machine.
-- No telemetry, no analytics, no cloud sync.
+- All data stays **100% local** – Gemma runs in-process via HuggingFace transformers.
+- No telemetry, no analytics, no cloud sync, no external server.
 - Code execution skill runs in a **sandboxed subprocess** with restricted builtins.
 - Filesystem skill blocks access to system directories (`/etc`, `/bin`, etc.).
 
