@@ -106,7 +106,7 @@ Agentic works with **any HuggingFace instruction-tuned model** whose tokenizer s
 |--------|-------------------|-------|
 | **Gemma** | `google/gemma-3-1b-it`, `gemma-3-4b-it`, `gemma-3-12b-it`, `gemma-2-9b-it` | Default; runs on CPU |
 | **Llama 3** | `meta-llama/Llama-3.2-1B-Instruct`, `Llama-3.2-3B-Instruct`, `Llama-3.1-8B-Instruct` | Requires HF token (gated) |
-| **Mistral** | `mistralai/Mistral-7B-Instruct-v0.3` | Good quality/speed balance |
+| **Mistral** | `mistralai/Mistral-7B-Instruct-v0.3`, `mistralai/Mistral-Nemo-Instruct-2407` | Good quality/speed balance |
 | **Phi** | `microsoft/Phi-4-mini-instruct`, `Phi-3.5-mini-instruct` | Very compact, fast on CPU |
 | **Qwen** | `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2.5-7B-Instruct` | Strong multilingual support |
 

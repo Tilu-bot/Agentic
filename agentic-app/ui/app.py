@@ -106,7 +106,7 @@ class AgenticApp(tk.Tk):
         ).pack(padx=M.padding_md)
         AgLabel(
             brand, pal,
-            text="Reactive Cortex · Gemma",
+            text="Reactive Cortex · Multi-Model",
             muted=True, size=FONTS.size_xs,
             bg=pal.bg_deep,
         ).pack()
@@ -135,7 +135,7 @@ class AgenticApp(tk.Tk):
         div2.pack(fill="x", side="bottom", pady=M.padding_sm)
         AgLabel(
             self._sidebar, pal,
-            text="v1.0  •  Gemma · HuggingFace",
+            text="v1.0  •  Multi-Model · HuggingFace",
             muted=True, size=FONTS.size_xs,
             bg=pal.bg_deep,
         ).pack(side="bottom", pady=M.padding_xs)
@@ -198,7 +198,7 @@ class AgenticApp(tk.Tk):
         log.info("Agentic bootstrap complete")
         self._chat_view.append_system(
             "Welcome to Agentic! Powered by the Reactive Cortex Architecture.\n"
-            "Type a message to start. Gemma runs locally via HuggingFace transformers.\n"
+            "Type a message to start. The model runs locally via HuggingFace transformers.\n"
             "  → The model is downloaded automatically on first use.\n"
             "  → Go to Settings to choose a model and device."
         )

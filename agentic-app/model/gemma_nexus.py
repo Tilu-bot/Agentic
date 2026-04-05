@@ -52,6 +52,8 @@ _GEN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-gen"
 # Model families grouped for display in the Settings UI.
 # Each key is a human-readable family name; the value is an ordered list of
 # HuggingFace model IDs (instruction-tuned variants, lightest first).
+# Dict insertion order is preserved (Python 3.7+; this project requires 3.11+)
+# so the Settings quick-pick menu always shows families in the order below.
 MODEL_FAMILIES: dict[str, list[str]] = {
     "Gemma": [
         "google/gemma-3-1b-it",
@@ -67,6 +69,7 @@ MODEL_FAMILIES: dict[str, list[str]] = {
     ],
     "Mistral": [
         "mistralai/Mistral-7B-Instruct-v0.3",
+        "mistralai/Mistral-Nemo-Instruct-2407",
     ],
     "Phi": [
         "microsoft/Phi-4-mini-instruct",
