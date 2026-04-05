@@ -75,6 +75,11 @@ class TaskFiber:
     deps: frozenset[str] = field(default_factory=frozenset)
     priority: int = 5
     tags: list[str] = field(default_factory=list)
+    # Optional wall-clock timeout (seconds).  When > 0, the fiber is
+    # automatically cancelled if it has not completed within this duration.
+    # 0 means no timeout (unlimited).  The default 0 is safe because the
+    # SkillRegistry already enforces skill_timeout_s via asyncio.wait_for.
+    timeout_s: float = 0.0
 
     fiber_id: str       = field(default_factory=lambda: uuid.uuid4().hex[:10])
     status: FiberStatus = field(default=FiberStatus.PENDING, init=False)
@@ -228,7 +233,11 @@ class TaskFabric:
             if fiber.is_cancelled:
                 fiber.status = FiberStatus.CANCELLED
                 return
-            result = await fiber.fn(fiber)
+            coro = fiber.fn(fiber)
+            if fiber.timeout_s > 0:
+                result = await asyncio.wait_for(coro, timeout=fiber.timeout_s)
+            else:
+                result = await coro
             if fiber.is_cancelled:
                 fiber.status = FiberStatus.CANCELLED
                 lattice.emit_kind(
@@ -257,6 +266,21 @@ class TaskFabric:
                 {"fiber_id": fiber.fiber_id, "label": fiber.label},
                 source="task_fabric",
             )
+        except asyncio.TimeoutError:
+            # Raised by asyncio.wait_for when timeout_s is exceeded.
+            timeout_msg = f"Timed out after {fiber.timeout_s}s"
+            fiber.error  = timeout_msg
+            fiber.status = FiberStatus.FAILED
+            lattice.emit_kind(
+                SigKind.TASK_FAILED,
+                {
+                    "fiber_id": fiber.fiber_id,
+                    "label": fiber.label,
+                    "error": timeout_msg,
+                },
+                source="task_fabric",
+            )
+            log.warning("Fiber TIMEOUT %s [%s]: %s", fiber.fiber_id, fiber.label, timeout_msg)
         except Exception as exc:
             fiber.error = str(exc)
             fiber.status = FiberStatus.FAILED

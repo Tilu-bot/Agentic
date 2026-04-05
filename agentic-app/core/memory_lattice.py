@@ -22,7 +22,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from threading import Lock
 from typing import Any
 
@@ -41,13 +41,11 @@ class FluidEntry:
     role: str        # "user" | "assistant" | "system" | "skill"
     text: str
     ts: float = 0.0
-    tags: list[str] = None  # type: ignore[assignment]
+    tags: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.ts == 0.0:
             self.ts = time.time()
-        if self.tags is None:
-            self.tags = []
 
 
 @dataclass

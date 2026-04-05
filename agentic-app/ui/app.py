@@ -188,8 +188,10 @@ class AgenticApp(tk.Tk):
         self._cortex.start()
 
         # Subscribe to deliberation end (to signal streaming complete)
-        lattice.on(SigKind.DELIBERATION_END, self._on_deliberation_end)
-        lattice.on(SigKind.MODEL_ERROR,       self._on_model_error)
+        lattice.on(SigKind.DELIBERATION_START, self._on_deliberation_start)
+        lattice.on(SigKind.DELIBERATION_END,   self._on_deliberation_end)
+        lattice.on(SigKind.REACT_ITERATION,    self._on_react_iteration)
+        lattice.on(SigKind.MODEL_ERROR,        self._on_model_error)
 
         # Build views
         self._build_views()
@@ -259,9 +261,24 @@ class AgenticApp(tk.Tk):
         if hasattr(self, "_chat_view"):
             self._chat_view.push_token(token)
 
+    def _on_deliberation_start(self, sig: Any) -> None:
+        """Update status bar as soon as deliberation begins."""
+        if hasattr(self, "_chat_view"):
+            self._chat_view.set_status("Thinking…", busy=True)
+
     def _on_deliberation_end(self, sig: Any) -> None:
         if hasattr(self, "_chat_view"):
             self._chat_view.finish_streaming()
+
+    def _on_react_iteration(self, sig: Any) -> None:
+        """Inform the user that the model is running tools and re-reasoning."""
+        iteration   = sig.payload.get("iteration", "?")
+        skills_run  = sig.payload.get("skills_run", [])
+        skill_names = ", ".join(skills_run) or "none"
+        if hasattr(self, "_chat_view"):
+            self._chat_view.set_status(
+                f"Reasoning… (iteration {iteration}, tools: {skill_names})", busy=True
+            )
 
     def _on_model_error(self, sig: Any) -> None:
         error = sig.payload.get("error", "Unknown error")

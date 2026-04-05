@@ -136,7 +136,7 @@ def _supports_tool_calls(tokenizer: Any) -> bool:
         return False
 
 
-
+def _supports_system_role(tokenizer: Any) -> bool:
     """
     Probe the tokenizer's chat template for native 'system' role support.
 

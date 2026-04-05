@@ -15,6 +15,7 @@ Design:
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from threading import Lock
@@ -158,6 +159,11 @@ class SkillRegistry:
         """
         Invoke a registered skill by name.
         Emits SKILL_INVOKED and SKILL_RESULT / SKILL_ERROR signals.
+
+        The configured ``skill_timeout_s`` value is enforced here so that a
+        misbehaving or blocked skill cannot stall the entire ReAct loop
+        indefinitely.  On timeout the skill is cancelled and a SkillResult
+        with ``success=False`` is returned.
         """
         spec = self.get(name)
         if spec is None:
@@ -172,9 +178,13 @@ class SkillRegistry:
             {"skill": name, "args": kwargs},
             source="skill_registry",
         )
+
+        from utils.config import cfg  # local import to avoid circular at module load
+        timeout_s: float = cfg.get("skill_timeout_s", 30)
+
         t0 = time.monotonic()
         try:
-            output = await spec.fn(**kwargs)
+            output = await asyncio.wait_for(spec.fn(**kwargs), timeout=timeout_s)
             elapsed = time.monotonic() - t0
             result = SkillResult(
                 skill_name=name, success=True, output=output, elapsed_s=elapsed
@@ -182,6 +192,22 @@ class SkillRegistry:
             lattice.emit_kind(
                 SigKind.SKILL_RESULT,
                 {"skill": name, "output": output, "elapsed_s": elapsed},
+                source="skill_registry",
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - t0
+            msg = f"Skill '{name}' timed out after {timeout_s}s"
+            log.warning(msg)
+            result = SkillResult(
+                skill_name=name,
+                success=False,
+                output=None,
+                error=msg,
+                elapsed_s=elapsed,
+            )
+            lattice.emit_kind(
+                SigKind.SKILL_ERROR,
+                {"skill": name, "error": msg},
                 source="skill_registry",
             )
         except Exception as exc:

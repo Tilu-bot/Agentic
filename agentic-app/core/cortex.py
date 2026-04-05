@@ -160,6 +160,13 @@ class Cortex:
         """
         log.info("Deliberation pulse: '%s'", user_text[:80])
 
+        # ── 0. Signal that deliberation has begun ────────────────────────
+        lattice.emit_kind(
+            SigKind.DELIBERATION_START,
+            {"input": user_text[:200]},
+            source="cortex",
+        )
+
         # ── 1. Write user input to fluid memory ─────────────────────────
         self._memory.fluid_write("user", user_text)
 
