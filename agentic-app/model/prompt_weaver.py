@@ -182,7 +182,7 @@ class PromptWeaver:
             skill_name = text[name_start:name_end]
 
             # Require a valid Python identifier as the skill name
-            if not skill_name or not skill_name.replace("_", "a").isalnum():
+            if not skill_name or not skill_name.isidentifier():
                 i = pos + 1
                 continue
 

@@ -225,7 +225,7 @@ def _truncate_to_sentences(text: str, max_chars: int = 600) -> str:
     Splits on sentence-ending punctuation and accumulates whole sentences
     until *max_chars* would be exceeded, then stops.  The result is always
     a grammatically complete prefix of the source text rather than a raw
-    character slice.  This is intentionally NOT a summariser – no
+    character slice.  This is intentionally NOT a summarizer – no
     information is reordered or generated.
     """
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
