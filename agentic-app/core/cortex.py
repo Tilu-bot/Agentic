@@ -42,6 +42,12 @@ from utils.logger import build_logger
 
 log = build_logger("agentic.cortex")
 
+# Status message template emitted to the UI after each ReAct tool round-trip.
+# Shows the current iteration and the names of skills that were executed.
+_REACT_ITERATION_STATUS = (
+    "\n\n[⚙ Skills executed: {skill_names} — reasoning continues…]\n\n"
+)
+
 
 class Cortex:
     """
@@ -264,7 +270,7 @@ class Cortex:
                 skill_names = ", ".join(inv.skill_name for inv in skill_queue)
                 try:
                     self._on_token(
-                        f"\n\n[⚙ Skills executed: {skill_names} — reasoning continues…]\n\n"
+                        _REACT_ITERATION_STATUS.format(skill_names=skill_names)
                     )
                 except Exception:
                     pass

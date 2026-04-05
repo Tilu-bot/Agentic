@@ -47,8 +47,10 @@ def _safe_path(raw: str) -> Path:
     to smuggle a blocked prefix past the check after resolution.
     """
     p = Path(raw).expanduser().resolve()
-    # Check the path itself and every ancestor up to the filesystem root
-    for ancestor in (p, *p.parents):
+    # Materialise all ancestors once, including the path itself, to avoid
+    # redundant parent-chain reconstruction on each iteration.
+    ancestors = [p, *p.parents]
+    for ancestor in ancestors:
         if ancestor in _BLOCKED_DIRS:
             raise PermissionError(
                 f"Access to '{p}' is not allowed (falls under blocked directory '{ancestor}')"

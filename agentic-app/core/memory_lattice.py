@@ -137,7 +137,7 @@ class MemoryLattice:
             # treat its recency as 1.0 so it is never penalised.
             recency    = (i / (n - 1)) if n > 1 else 1.0
             importance = _score_importance([entry])  # 0.0 – 1.0
-            keep_score = 0.6 * recency + 0.4 * importance
+            keep_score = _EVICT_RECENCY_WEIGHT * recency + _EVICT_IMPORTANCE_WEIGHT * importance
             scored.append((keep_score, i, entry))
 
         # Sort ascending: lowest keep_score → evicted first
@@ -254,6 +254,14 @@ class MemoryLattice:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+# Weights for the keep-score formula used in _evict_to_crystal().
+# Keep-score = _EVICT_RECENCY_WEIGHT × recency + _EVICT_IMPORTANCE_WEIGHT × importance
+# Recency is weighted slightly higher than importance (60/40) so that normal
+# conversational flow is preserved while still keeping high-value old turns.
+_EVICT_RECENCY_WEIGHT    = 0.6
+_EVICT_IMPORTANCE_WEIGHT = 0.4
+
 
 def _fact_id(category: str, text: str) -> str:
     """

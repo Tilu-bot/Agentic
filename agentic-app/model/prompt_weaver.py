@@ -81,6 +81,10 @@ _TOOL_CALL_OPEN  = "<tool_call>"
 _TOOL_CALL_CLOSE = "</tool_call>"
 _MISTRAL_TOOL_CALLS_PREFIX = "[TOOL_CALLS]"
 
+# Maximum characters to include from a skill's argument dict in the observation
+# message.  Keeps the context window reasonable when args contain large payloads.
+_ARG_SUMMARY_MAX_CHARS = 120
+
 
 @dataclass
 class SkillInvocation:
@@ -347,7 +351,7 @@ class PromptWeaver:
         ]
         for inv, result, success in results:
             status = "SUCCESS" if success else "ERROR"
-            arg_summary = json.dumps(inv.args, ensure_ascii=False)[:120]
+            arg_summary = json.dumps(inv.args, ensure_ascii=False)[:_ARG_SUMMARY_MAX_CHARS]
             parts.append(
                 f"\n[{status}] {inv.skill_name}({arg_summary}):\n{result}"
             )
