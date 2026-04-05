@@ -16,25 +16,29 @@ Role mapping:
   supported model.
 
 Skill invocation protocol:
-  The model signals a skill call using the compact markup:
+  Two formats are accepted so the model can choose the clearest expression:
+
+  Format A – inline marker (simple args):
     @@SKILL:<name> <json-args>@@
-  The Cortex scans assistant output for these markers and dispatches
-  them to the SkillRegistry.
+
+  Format B – block marker (complex/nested args, inspired by structured
+    tool-use formats used in modern agent SDKs):
+    <skill_call>{"name": "<name>", "args": <json-args>}</skill_call>
+
+  The inline parser uses brace-depth tracking instead of a greedy/non-greedy
+  regex so that nested JSON objects (e.g. args containing sub-dicts) are
+  parsed correctly.  The old .*? approach stopped at the first closing brace
+  and silently lost nested args.
 """
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from core.memory_lattice import FluidEntry
 from model.gemma_nexus import get_assistant_role
 from utils.config import cfg
-
-SKILL_INVOKE_PATTERN = re.compile(
-    r"@@SKILL:(\w+)\s+(\{.*?\})@@", re.DOTALL
-)
 
 _SYSTEM_TEMPLATE = """\
 You are Agentic, a multi-task AI assistant powered by the Reactive Cortex Architecture.
@@ -45,10 +49,18 @@ You think carefully, act step-by-step, and use available skills when needed.
 {memory_block}
 
 == Skill Invocation Syntax ==
-To use a skill, output exactly:
-  @@SKILL:<skill_name> <json_args>@@
-Example:
-  @@SKILL:read_file {{"path": "/home/user/notes.txt"}}@@
+Choose whichever format is clearest for the skill call:
+
+  Format A (inline, for simple arguments):
+    @@SKILL:<skill_name> <json_args>@@
+  Example:
+    @@SKILL:read_file {{"path": "/home/user/notes.txt"}}@@
+
+  Format B (block, preferred for complex or nested arguments):
+    <skill_call>{{"name": "<skill_name>", "args": <json_args>}}</skill_call>
+  Example:
+    <skill_call>{{"name": "run_python", "args": {{"code": "print(2+2)"}}}}</skill_call>
+
 Only invoke skills when necessary. You may invoke multiple skills in one response.
 Wait for skill results before concluding your answer.
 
@@ -59,12 +71,50 @@ Wait for skill results before concluding your answer.
 - Cite skills used in your final response.
 """
 
+# XML-style block marker constants
+_BLOCK_OPEN  = "<skill_call>"
+_BLOCK_CLOSE = "</skill_call>"
+
 
 @dataclass
 class SkillInvocation:
     skill_name: str
     args: dict[str, Any]
     raw: str
+
+
+def _extract_json_object(text: str, start: int) -> tuple[str, int] | None:
+    """
+    Extract a complete JSON object from *text* beginning at *start*.
+
+    Walks character-by-character tracking brace depth and string state so
+    that nested objects (e.g. {"outer": {"inner": 1}}) are captured in
+    full.  Returns (json_string, exclusive_end_index) on success or None
+    if no complete object is found.
+    """
+    if start >= len(text) or text[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+        elif ch == "\\" and in_string:
+            escape_next = True
+        elif ch == '"':
+            in_string = not in_string
+        elif not in_string:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1], i + 1
+        i += 1
+    return None
 
 
 class PromptWeaver:
@@ -107,23 +157,96 @@ class PromptWeaver:
 
     @staticmethod
     def extract_skill_calls(text: str) -> list[SkillInvocation]:
-        """Parse all @@SKILL:...@@ markers from an assistant response."""
+        """
+        Parse all skill invocations from an assistant response.
+
+        Handles both inline (@@SKILL:...@@) and block (<skill_call>...</skill_call>)
+        formats.  Inline args are parsed with a brace-depth tracker so nested
+        JSON objects are correctly captured.
+        """
         results: list[SkillInvocation] = []
-        for m in SKILL_INVOKE_PATTERN.finditer(text):
-            skill_name = m.group(1)
-            raw_args   = m.group(2)
+
+        # ── Format A: @@SKILL:<name> {...}@@ ──────────────────────────
+        i = 0
+        inline_marker = "@@SKILL:"
+        while i < len(text):
+            pos = text.find(inline_marker, i)
+            if pos == -1:
+                break
+
+            name_start = pos + len(inline_marker)
+            # Collect the skill name (runs until whitespace or '{')
+            name_end = name_start
+            while name_end < len(text) and text[name_end] not in (" ", "\t", "\n", "{"):
+                name_end += 1
+            skill_name = text[name_start:name_end]
+
+            # Require a valid Python identifier as the skill name
+            if not skill_name or not skill_name.isidentifier():
+                i = pos + 1
+                continue
+
+            # Skip optional whitespace before the JSON object
+            j = name_end
+            while j < len(text) and text[j] in (" ", "\t", "\n"):
+                j += 1
+
+            extracted = _extract_json_object(text, j)
+            if extracted is None:
+                i = pos + 1
+                continue
+            json_str, end_pos = extracted
+
+            # Expect the closing @@ immediately after the JSON object
+            if text[end_pos : end_pos + 2] != "@@":
+                i = pos + 1
+                continue
+
+            raw = text[pos : end_pos + 2]
             try:
-                args = json.loads(raw_args)
+                args = json.loads(json_str)
             except json.JSONDecodeError:
-                args = {"raw": raw_args}
-            results.append(
-                SkillInvocation(skill_name=skill_name, args=args, raw=m.group(0))
-            )
+                args = {"raw": json_str}
+
+            results.append(SkillInvocation(skill_name=skill_name, args=args, raw=raw))
+            i = end_pos + 2
+
+        # ── Format B: <skill_call>{"name": "...", "args": {...}}</skill_call> ──
+        # Inspired by structured tool-use formats in modern agent SDKs:
+        # the outer object carries the name and args as distinct keys so the
+        # JSON is self-describing and easier for models to emit correctly.
+        j = 0
+        while j < len(text):
+            open_pos = text.find(_BLOCK_OPEN, j)
+            if open_pos == -1:
+                break
+            content_start = open_pos + len(_BLOCK_OPEN)
+            close_pos = text.find(_BLOCK_CLOSE, content_start)
+            if close_pos == -1:
+                break
+
+            raw_content = text[content_start:close_pos].strip()
+            raw = text[open_pos : close_pos + len(_BLOCK_CLOSE)]
+
+            try:
+                obj = json.loads(raw_content)
+                skill_name = obj.get("name", "")
+                # Accept either "args" or "arguments" as the param key
+                args = obj.get("args", obj.get("arguments", {}))
+                if skill_name and isinstance(args, dict):
+                    results.append(
+                        SkillInvocation(skill_name=skill_name, args=args, raw=raw)
+                    )
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+            j = close_pos + len(_BLOCK_CLOSE)
+
         return results
 
     @staticmethod
     def inject_skill_result(text: str, invocation: SkillInvocation, result: str) -> str:
-        """Replace a @@SKILL:...@@ marker with its result in the response text."""
+        """Replace a skill marker with its result in the response text."""
         replacement = f"[Skill: {invocation.skill_name} → {result}]"
         return text.replace(invocation.raw, replacement, 1)
 

@@ -67,6 +67,10 @@ class Cortex:
         )
         self._on_token = on_token   # optional direct callback for UI streaming
         self._active   = False
+        # Guard against overlapping deliberations.  Since _deliberate runs on
+        # the single-threaded asyncio event loop, a plain bool is race-safe
+        # here – no lock is needed.
+        self._deliberating = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -111,6 +115,31 @@ class Cortex:
 
     async def _deliberate(self, user_text: str) -> None:
         """Core cognitive cycle: perceive → reason → act → integrate."""
+        # Prevent overlapping deliberations.  Because this coroutine runs on
+        # the Cortex's dedicated single-threaded asyncio loop, checking and
+        # setting a plain bool is safe without a lock.  If the model is already
+        # generating a response, the new input is dropped and the user is
+        # notified via the signal lattice.
+        if self._deliberating:
+            log.warning(
+                "Deliberation already in progress; input dropped: '%s'",
+                user_text[:60],
+            )
+            lattice.emit_kind(
+                SigKind.NOTIFICATION,
+                {"message": "Please wait for the current response to complete."},
+                source="cortex",
+            )
+            return
+
+        self._deliberating = True
+        try:
+            await self._deliberate_inner(user_text)
+        finally:
+            self._deliberating = False
+
+    async def _deliberate_inner(self, user_text: str) -> None:
+        """Performs the actual deliberation once the busy guard has been acquired."""
         log.info("Deliberation pulse: '%s'", user_text[:80])
 
         # 1. Write user input to fluid memory
@@ -197,30 +226,42 @@ class Cortex:
         invocations: list[SkillInvocation],
         response: str,
     ) -> str:
-        """Execute skill calls and inject results into the response."""
+        """
+        Execute skill calls as Task Fibers and inject their results into the
+        response text.
+
+        Each invocation gets its own fiber.  We store the fiber_id returned by
+        add_fiber() and look up results by ID after run_until_empty() completes,
+        rather than scanning by label.  Label-based lookup was fragile because
+        two invocations of the same skill would share a label and the first
+        matching fiber (potentially the wrong one) would be used for both.
+        """
+        # Map fiber_id → its SkillInvocation so we can match results precisely
+        id_to_inv: dict[str, SkillInvocation] = {}
         for inv in invocations:
             fiber = TaskFiber(
                 label=f"skill:{inv.skill_name}",
                 fn=self._make_skill_fn(inv),
                 tags=["skill"],
             )
-            self._fabric.add_fiber(fiber)
+            fid = self._fabric.add_fiber(fiber)
+            id_to_inv[fid] = inv
 
         await self._fabric.run_until_empty()
 
-        for inv in invocations:
-            # Find the fiber for this invocation
-            for fiber in self._fabric.all_fibers():
-                if fiber.label == f"skill:{inv.skill_name}":
-                    if fiber.status == FiberStatus.DONE:
-                        result_str = str(fiber.result)[:1000]
-                        response = self._weaver.inject_skill_result(
-                            response, inv, result_str
-                        )
-                    elif fiber.status == FiberStatus.FAILED:
-                        response = self._weaver.inject_skill_result(
-                            response, inv, f"ERROR: {fiber.error}"
-                        )
+        for fid, inv in id_to_inv.items():
+            fiber = self._fabric.get_fiber(fid)
+            if fiber is None:
+                continue
+            if fiber.status == FiberStatus.DONE:
+                result_str = str(fiber.result)[:1000]
+                response = self._weaver.inject_skill_result(
+                    response, inv, result_str
+                )
+            elif fiber.status == FiberStatus.FAILED:
+                response = self._weaver.inject_skill_result(
+                    response, inv, f"ERROR: {fiber.error}"
+                )
 
         return response
 
