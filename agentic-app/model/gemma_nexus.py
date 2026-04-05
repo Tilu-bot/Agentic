@@ -1,7 +1,7 @@
 """
-Agentic - Gemma Nexus
+Agentic - Model Nexus
 =====================
-Direct HuggingFace `transformers` inference for any Gemma model.
+Direct HuggingFace `transformers` inference for any causal instruction model.
 No server, no middleware, no API keys – the model runs entirely in-process.
 
 Model weights are downloaded once from HuggingFace Hub and cached in
@@ -11,11 +11,20 @@ Streaming is implemented via `TextIteratorStreamer`: model.generate() runs
 in a background thread while tokens are pushed into an asyncio.Queue and
 yielded to the caller one at a time, so the UI never blocks.
 
-Supported models (any instruction-tuned Gemma variant):
-  google/gemma-3-1b-it   – fast, runs on CPU, good for low-end hardware
-  google/gemma-3-4b-it   – balanced quality/speed
-  google/gemma-3-12b-it  – high quality, benefits from a GPU
-  google/gemma-2-2b-it   – very compact, older generation
+Supported model families (see MODEL_FAMILIES for full list):
+  Gemma  – google/gemma-3-1b-it, gemma-3-4b-it, gemma-3-12b-it, …
+  Llama  – meta-llama/Llama-3.2-1B-Instruct, Llama-3.1-8B-Instruct, …
+  Mistral – mistralai/Mistral-7B-Instruct-v0.3
+  Phi    – microsoft/Phi-4-mini-instruct, Phi-3.5-mini-instruct
+  Qwen   – Qwen/Qwen2.5-1.5B-Instruct, Qwen2.5-7B-Instruct
+
+Chat template handling:
+  Each model family uses different role names and special tokens.
+  HuggingFace tokenizers ship a built-in chat_template (Jinja2) that
+  applies_chat_template() uses automatically — switching the model ID is
+  enough to get the correct format.  The only exception is Gemma, which
+  uses "model" instead of "assistant" for the AI turn; get_assistant_role()
+  returns the correct role string for any model.
 
 Device selection (configured in Settings):
   "auto"  → use CUDA GPU if available, then MPS (Apple Silicon), then CPU
@@ -35,19 +44,55 @@ from core.signal_lattice import SigKind, lattice
 from utils.config import cfg
 from utils.logger import build_logger
 
-log = build_logger("agentic.gemma_nexus")
+log = build_logger("agentic.model_nexus")
 
 # One dedicated thread for generation so the event loop is never blocked.
-_GEN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gemma-gen")
+_GEN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-gen")
 
-# Gemma model IDs offered in the Settings dropdown.
-KNOWN_MODELS: list[str] = [
-    "google/gemma-3-1b-it",
-    "google/gemma-3-4b-it",
-    "google/gemma-3-12b-it",
-    "google/gemma-2-2b-it",
-    "google/gemma-2-9b-it",
-]
+# Model families grouped for display in the Settings UI.
+# Each key is a human-readable family name; the value is an ordered list of
+# HuggingFace model IDs (instruction-tuned variants, lightest first).
+MODEL_FAMILIES: dict[str, list[str]] = {
+    "Gemma": [
+        "google/gemma-3-1b-it",
+        "google/gemma-3-4b-it",
+        "google/gemma-3-12b-it",
+        "google/gemma-2-2b-it",
+        "google/gemma-2-9b-it",
+    ],
+    "Llama": [
+        "meta-llama/Llama-3.2-1B-Instruct",
+        "meta-llama/Llama-3.2-3B-Instruct",
+        "meta-llama/Llama-3.1-8B-Instruct",
+    ],
+    "Mistral": [
+        "mistralai/Mistral-7B-Instruct-v0.3",
+    ],
+    "Phi": [
+        "microsoft/Phi-4-mini-instruct",
+        "microsoft/Phi-3.5-mini-instruct",
+    ],
+    "Qwen": [
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct",
+    ],
+}
+
+# Flat list derived from MODEL_FAMILIES (used by legacy callers).
+KNOWN_MODELS: list[str] = [m for models in MODEL_FAMILIES.values() for m in models]
+
+
+def get_assistant_role(model_id: str) -> str:
+    """
+    Return the correct assistant-turn role name for a given model ID.
+
+    Gemma instruction models use the non-standard role name ``"model"``
+    instead of the conventional ``"assistant"``.  All other HuggingFace
+    model families (Llama, Mistral, Phi, Qwen, …) use ``"assistant"``.
+    This is passed to ``tokenizer.apply_chat_template`` so the correct
+    special tokens are generated regardless of the active model.
+    """
+    return "model" if "gemma" in model_id.lower() else "assistant"
 
 
 @dataclass
@@ -63,18 +108,20 @@ class NexusResponse:
 
 
 # ---------------------------------------------------------------------------
-# GemmaNexus
+# ModelNexus
 # ---------------------------------------------------------------------------
 
-class GemmaNexus:
+class ModelNexus:
     """
-    Direct HuggingFace transformers interface for Gemma instruction models.
+    Direct HuggingFace transformers interface for any instruction-tuned model.
 
-    The model is loaded lazily on first use and kept in memory for
-    subsequent calls.  A threading.Lock ensures only one load runs at a time.
+    Supports Gemma, Llama, Mistral, Phi, Qwen, and any other model whose
+    tokenizer ships a built-in chat_template.  The model is loaded lazily
+    on first use and kept in memory for subsequent calls.  A threading.Lock
+    ensures only one load runs at a time.
 
     Usage:
-        nexus = GemmaNexus()
+        nexus = ModelNexus()
         async for token in nexus.stream(messages):
             print(token, end="", flush=True)
     """
@@ -178,7 +225,7 @@ class GemmaNexus:
         """Free model from memory (e.g. before loading a different one)."""
         self._model     = None
         self._tokenizer = None
-        log.info("GemmaNexus: model released")
+        log.info("ModelNexus: model released")
 
     # ------------------------------------------------------------------
     # Streaming generation
@@ -221,13 +268,16 @@ class GemmaNexus:
                 "transformers is required. Run: pip install transformers torch accelerate"
             ) from exc
 
-        # Build conversation using Gemma's chat template.
-        # Gemma instruction models use user/model alternation; the system
-        # context is prepended as a user turn so the template renders correctly.
+        # Build conversation using the model's chat template.
+        # Most models use user/assistant alternation.  Gemma uses "model"
+        # instead of "assistant"; get_assistant_role() handles this distinction.
+        # The system context is prepended as a user/assistant exchange so the
+        # template renders correctly regardless of model family.
+        asst_role = get_assistant_role(self._model_id)
         full_messages: list[dict] = []
         if system:
             full_messages.append({"role": "user", "content": system})
-            full_messages.append({"role": "model", "content": "Understood."})
+            full_messages.append({"role": asst_role, "content": "Understood."})
         full_messages.extend(messages)
 
         tokenizer = self._tokenizer
@@ -261,7 +311,7 @@ class GemmaNexus:
         lattice.emit_kind(
             SigKind.DELIBERATION_START,
             {"model": self._model_id, "message_count": len(full_messages)},
-            source="gemma_nexus",
+            source="model_nexus",
         )
 
         # Thread-safe queue bridges the generation thread and this coroutine.
@@ -286,7 +336,7 @@ class GemmaNexus:
                     lattice.emit_kind(
                         SigKind.MODEL_STREAM_TOKEN,
                         {"token": text, "seq": seq},
-                        source="gemma_nexus",
+                        source="model_nexus",
                     )
                     loop.call_soon_threadsafe(token_queue.put_nowait, text)
 
@@ -309,7 +359,7 @@ class GemmaNexus:
                 lattice.emit_kind(
                     SigKind.MODEL_ERROR,
                     {"error": str(err)},
-                    source="gemma_nexus",
+                    source="model_nexus",
                 )
                 log.exception("Generation failed: %s", err)
                 raise RuntimeError(str(err)) from err
@@ -321,7 +371,7 @@ class GemmaNexus:
                     "prompt_tokens": prompt_len,
                     "model": self._model_id,
                 },
-                source="gemma_nexus",
+                source="model_nexus",
             )
             log.debug(
                 "Stream done: %d prompt + %d completion tokens",
@@ -348,3 +398,12 @@ class GemmaNexus:
     # Alias kept for API compatibility with Cortex.stop()
     async def close(self) -> None:
         self.release()
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility alias
+# ---------------------------------------------------------------------------
+
+# Code that imports `GemmaNexus` directly (e.g. core/cortex.py) continues
+# to work without modification.  New code should use `ModelNexus`.
+GemmaNexus = ModelNexus

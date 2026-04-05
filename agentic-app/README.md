@@ -1,6 +1,6 @@
 # Agentic
 
-**Agentic** is a multi-task AI desktop application built on the original **Reactive Cortex Architecture (RCA)** – a novel agent design that uses signal-driven cognitive cycles, a three-tier memory lattice, and a parallel task fabric to orchestrate the open-source **Gemma** model running entirely in-process via HuggingFace `transformers`.
+**Agentic** is a multi-task AI desktop application built on the original **Reactive Cortex Architecture (RCA)** – a novel agent design that uses signal-driven cognitive cycles, a three-tier memory lattice, and a parallel task fabric to orchestrate open-source language models running entirely in-process via HuggingFace `transformers`.
 
 > ⚠️ This is original software. All architecture, code, and design were created from scratch after studying the landscape of existing agentic systems. No code was copied from any other project.
 
@@ -13,7 +13,8 @@
 | **Reactive Cortex Architecture** | Signal-driven cognitive cycles – no polling loops |
 | **Task Fabric** | Parallel execution of agent sub-tasks with dependency tracking |
 | **Three-Tier Memory Lattice** | Fluid (working) → Crystal (episodic) → Bedrock (semantic facts) |
-| **Gemma via HuggingFace** | Runs 100% locally, no API keys, no server required |
+| **Multi-model support** | Gemma, Llama 3, Mistral, Phi, Qwen – any HF instruction model |
+| **100% local inference** | Runs via HuggingFace `transformers`; no API keys, no server needed |
 | **Streaming responses** | Token-by-token display with live progress |
 | **Built-in Skills** | File I/O, web fetching, Python code execution, memory ops |
 | **Desktop App** | Native window (tkinter), packaged with PyInstaller – no browser needed |
@@ -37,7 +38,7 @@ User Input
 [Cortex]                                                       │
   1. Assemble context from Memory Lattice                      │
   2. Weave system prompt (skills manifest + memory context)    │
-  3. Stream response from Gemma Nexus ─────────────────────►  │
+  3. Stream response from Model Nexus ─────────────────────►  │
   4. Parse Intent Shards (@@SKILL:...@@ markers)               │
   5. Dispatch to Task Fabric (parallel fibers)                 │
   6. Inject skill results into response                        │
@@ -55,10 +56,12 @@ User Input
   • CRYSTAL → compressed episodic (SQLite)
   • BEDROCK → semantic facts (SQLite)
 
-[Gemma Nexus]
+[Model Nexus]
   → HuggingFace transformers (runs in-process)
+  → Supports Gemma, Llama, Mistral, Phi, Qwen and any HF model
   → TextIteratorStreamer for async token delivery
   → Lazy model load with in-memory caching
+  → Chat template auto-detected from tokenizer (no manual formatting)
 ```
 
 ### Component Glossary
@@ -70,8 +73,8 @@ User Input
 | **TaskFabric** | Manages TaskFibers (parallel sub-tasks) |
 | **MemoryLattice** | Three-tier memory: Fluid / Crystal / Bedrock |
 | **SkillRegistry** | Self-describing tool/skill catalogue |
-| **GemmaNexus** | Direct HuggingFace transformers inference; TextIteratorStreamer for async tokens |
-| **PromptWeaver** | Assembles system + history prompts dynamically |
+| **ModelNexus** | Direct HuggingFace transformers inference; TextIteratorStreamer for async tokens; multi-family model support |
+| **PromptWeaver** | Assembles system + history prompts; role mapping adapts to active model family |
 
 ---
 
@@ -91,7 +94,24 @@ pip install -r requirements.txt
 
 > **GPU (recommended for larger models):** install PyTorch with CUDA support from
 > [https://pytorch.org/get-started/locally](https://pytorch.org/get-started/locally).
-> On CPU, use `google/gemma-3-1b-it` for acceptable speed.
+> On CPU, use `google/gemma-3-1b-it` or `meta-llama/Llama-3.2-1B-Instruct` for acceptable speed.
+
+---
+
+## 🤖 Supported Models
+
+Agentic works with **any HuggingFace instruction-tuned model** whose tokenizer ships a `chat_template`.  The model family is auto-detected and the correct role names / special tokens are applied automatically.
+
+| Family | Example model IDs | Notes |
+|--------|-------------------|-------|
+| **Gemma** | `google/gemma-3-1b-it`, `gemma-3-4b-it`, `gemma-3-12b-it`, `gemma-2-9b-it` | Default; runs on CPU |
+| **Llama 3** | `meta-llama/Llama-3.2-1B-Instruct`, `Llama-3.2-3B-Instruct`, `Llama-3.1-8B-Instruct` | Requires HF token (gated) |
+| **Mistral** | `mistralai/Mistral-7B-Instruct-v0.3` | Good quality/speed balance |
+| **Phi** | `microsoft/Phi-4-mini-instruct`, `Phi-3.5-mini-instruct` | Very compact, fast on CPU |
+| **Qwen** | `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2.5-7B-Instruct` | Strong multilingual support |
+
+> **Custom models:** type any HuggingFace model ID directly in the Settings panel.
+> The Quick-pick menu groups the models above by family for convenience.
 
 ### 3. Run the app
 
@@ -151,7 +171,7 @@ agentic-app/
 │   └── skill_registry.py     # Skill/tool catalogue
 │
 ├── model/                    # Model integration
-│   ├── gemma_nexus.py        # Gemma via HuggingFace transformers (streaming)
+│   ├── gemma_nexus.py        # ModelNexus: multi-family HF transformers inference (streaming)
 │   └── prompt_weaver.py      # Dynamic prompt construction
 │
 ├── skills/                   # Built-in skills
@@ -248,7 +268,7 @@ class WeatherSkill(SkillBase):
 
 ## 🔒 Privacy & Security
 
-- All data stays **100% local** – Gemma runs in-process via HuggingFace transformers.
+- All data stays **100% local** – the model runs in-process via HuggingFace transformers.
 - No telemetry, no analytics, no cloud sync, no external server.
 - Code execution skill runs in a **sandboxed subprocess** with restricted builtins.
 - Filesystem skill blocks access to system directories (`/etc`, `/bin`, etc.).

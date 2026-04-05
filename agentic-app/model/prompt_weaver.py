@@ -1,12 +1,19 @@
 """
 Agentic - Prompt Weaver
 =======================
-Constructs prompts for the Gemma model dynamically from context.
+Constructs prompts for any instruction-tuned model dynamically from context.
 
 The weaver assembles:
   1. A system block: identity + skills manifest + memory context
   2. A conversation history block: fluid memory entries
   3. The current user turn
+
+Role mapping:
+  HuggingFace chat templates differ by model family.  Gemma uses "model"
+  for the assistant turn; all other families (Llama, Mistral, Phi, Qwen, …)
+  use "assistant".  _map_role() reads the active model_id from config and
+  returns the correct role string so apply_chat_template() works for any
+  supported model.
 
 Skill invocation protocol:
   The model signals a skill call using the compact markup:
@@ -22,6 +29,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from core.memory_lattice import FluidEntry
+from model.gemma_nexus import get_assistant_role
+from utils.config import cfg
 
 SKILL_INVOKE_PATTERN = re.compile(
     r"@@SKILL:(\w+)\s+(\{.*?\})@@", re.DOTALL
@@ -59,7 +68,7 @@ class SkillInvocation:
 
 
 class PromptWeaver:
-    """Builds message lists for the Gemma chat template from session context."""
+    """Builds message lists for any HuggingFace chat model from session context."""
 
     def __init__(self, skills_manifest: str) -> None:
         self._skills_manifest = skills_manifest
@@ -79,9 +88,12 @@ class PromptWeaver:
         user_input: str,
     ) -> list[dict]:
         """
-        Convert fluid memory entries + new user input into a Gemma chat
-        message list (role / content pairs).
-        Gemma uses "user" and "model" roles.
+        Convert fluid memory entries + new user input into a chat message list
+        (role / content pairs) compatible with the active model's chat template.
+
+        The assistant-turn role ("model" for Gemma, "assistant" for all other
+        families) is determined by reading the active model_id from config so
+        apply_chat_template() receives the correct role string.
         """
         messages: list[dict] = []
 
@@ -117,11 +129,22 @@ class PromptWeaver:
 
 
 def _map_role(role: str) -> str | None:
-    # Gemma instruction models use "user" and "model" as turn roles.
+    """
+    Map an internal Agentic role to the chat-template role expected by the
+    active model.
+
+    Gemma instruction models use "model" for the assistant turn; all other
+    HuggingFace model families (Llama, Mistral, Phi, Qwen, …) use "assistant".
+    The correct string is resolved at call-time from the active config so that
+    switching the model_id in Settings immediately affects new messages.
+    """
+    model_id = cfg.get("model_id", "")
+    asst_role = get_assistant_role(model_id)
+
     mapping = {
         "user":      "user",
-        "assistant": "model",
-        "system":    "user",    # system turns are encoded as user turns
-        "skill":     "model",   # skill results become part of model context
+        "assistant": asst_role,
+        "system":    "user",      # system turns are encoded as user turns
+        "skill":     asst_role,   # skill results become part of assistant context
     }
     return mapping.get(role.lower())

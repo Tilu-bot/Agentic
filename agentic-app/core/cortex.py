@@ -6,7 +6,7 @@ The central reasoning unit of the Reactive Cortex Architecture (RCA).
 The Cortex drives the *Deliberation Pulse*:
   1. Receive user input via the Signal Lattice.
   2. Assemble context from the Memory Lattice.
-  3. Call GemmaNexus to stream a response.
+  3. Call ModelNexus to stream a response.
   4. While streaming, watch for @@SKILL:...@@ markers.
   5. Dispatch skill invocations to SkillRegistry via TaskFibers.
   6. Inject skill results back into the response stream.

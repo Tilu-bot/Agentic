@@ -10,7 +10,7 @@ import threading
 import tkinter as tk
 from typing import Any, Callable
 
-from model.gemma_nexus import KNOWN_MODELS
+from model.gemma_nexus import KNOWN_MODELS, MODEL_FAMILIES
 from ui.components import AgButton, AgEntry, AgFrame, AgLabel
 from ui.theme import FONTS, M, Palette
 from utils.config import cfg
@@ -52,24 +52,32 @@ class SettingsView(tk.Frame):
         model_entry = AgEntry(model_frame, pal, textvariable=self._model_var)
         model_entry.pack(side="left", fill="x", expand=True, padx=(0, M.padding_xs))
 
-        # Quick-pick dropdown for known models
-        self._pick_var = tk.StringVar(value="")
-        pick_menu = tk.OptionMenu(
-            model_frame, self._pick_var, *KNOWN_MODELS,
-            command=lambda v: self._model_var.set(v),
-        )
-        pick_menu.config(
+        # Quick-pick dropdown grouped by model family
+        pick_btn = tk.Menubutton(
+            model_frame,
+            text="Quick pick…",
             bg=pal.bg_raised, fg=pal.fg_primary,
             activebackground=pal.bg_hover,
             activeforeground=pal.accent,
             highlightthickness=0, relief="flat",
             font=(FONTS.family_ui, FONTS.size_sm),
         )
-        pick_menu["menu"].config(
-            bg=pal.bg_raised, fg=pal.fg_primary,
-            activebackground=pal.accent_dim,
-        )
-        pick_menu.pack(side="right")
+        pick_menu = tk.Menu(pick_btn, tearoff=0, bg=pal.bg_raised, fg=pal.fg_primary)
+        pick_btn["menu"] = pick_menu
+
+        for family, models in MODEL_FAMILIES.items():
+            pick_menu.add_command(
+                label=f"── {family} ──",
+                foreground=pal.fg_muted,
+                state="disabled",
+            )
+            for mid in models:
+                pick_menu.add_command(
+                    label=mid,
+                    command=lambda v=mid: self._model_var.set(v),
+                )
+
+        pick_btn.pack(side="right")
 
         self._row_label("HuggingFace Token (optional, for gated models)", pal)
         self._token_var = tk.StringVar(value=cfg.get("hf_token", ""))
