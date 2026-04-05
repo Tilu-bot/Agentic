@@ -1,0 +1,19 @@
+# Agentic - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# HuggingFace model inference (Gemma runs directly in-process, no server needed)
+transformers>=4.40.0
+torch>=2.2.0
+accelerate>=0.29.0
+
+# Optional: 4-bit quantization (GPU only, requires compatible CUDA/ROCm)
+# bitsandbytes>=0.43.0
+
+# HuggingFace Hub helpers (cache check in Settings)
+huggingface_hub>=0.22.0
+
+# HTTP client for the web-fetch skill
+httpx>=0.27.0
+
+# PyInstaller for creating the downloadable desktop app
+pyinstaller>=6.6.0
