@@ -1,0 +1,11 @@
+# Agentic - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# HTTP client for Ollama API and web skill
+httpx>=0.27.0
+
+# Async I/O (stdlib in Python 3.11+, listed for clarity)
+# asyncio is stdlib – no install needed
+
+# PyInstaller for creating the downloadable desktop app
+pyinstaller>=6.6.0
