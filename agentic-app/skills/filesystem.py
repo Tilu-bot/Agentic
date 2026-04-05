@@ -62,8 +62,11 @@ class WriteFileSkill(SkillBase):
     async def execute(self, path: str, content: str, append: bool = False) -> str:
         p = _safe_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        mode = "a" if append else "w"
-        p.write_text(content, encoding="utf-8") if not append else p.open("a").write(content)
+        if append:
+            with p.open("a", encoding="utf-8") as fh:
+                fh.write(content)
+        else:
+            p.write_text(content, encoding="utf-8")
         return f"Written {len(content)} chars to {p}"
 
 

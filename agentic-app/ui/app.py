@@ -280,7 +280,7 @@ class AgenticApp(tk.Tk):
         from core.skill_registry import skill_registry
         from skills.memory_ops import set_memory_ref
         set_memory_ref(self._session_mgr.memory)
-        self._cortex._memory = self._session_mgr.memory  # type: ignore[attr-defined]
+        self._cortex.update_memory(self._session_mgr.memory)
         self._chat_view.clear()
         self._chat_view.append_system("New session started.")
         log.info("New session started: %s", sid)

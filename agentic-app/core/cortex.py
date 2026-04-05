@@ -84,6 +84,10 @@ class Cortex:
         self._thread.join(timeout=5)
         log.info("Cortex stopped")
 
+    def update_memory(self, memory: MemoryLattice) -> None:
+        """Replace the active MemoryLattice (e.g. when a new session is started)."""
+        self._memory = memory
+
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
