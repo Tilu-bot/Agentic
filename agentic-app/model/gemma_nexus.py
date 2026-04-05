@@ -11,23 +11,34 @@ Streaming is implemented via `TextIteratorStreamer`: model.generate() runs
 in a background thread while tokens are pushed into an asyncio.Queue and
 yielded to the caller one at a time, so the UI never blocks.
 
-Supported model families (see MODEL_FAMILIES for full list):
-  Gemma  – google/gemma-3-1b-it, gemma-3-4b-it, gemma-3-12b-it, …
-  Llama  – meta-llama/Llama-3.2-1B-Instruct, Llama-3.1-8B-Instruct, …
-  Mistral – mistralai/Mistral-7B-Instruct-v0.3
-  Phi    – microsoft/Phi-4-mini-instruct, Phi-3.5-mini-instruct
-  Qwen   – Qwen/Qwen2.5-1.5B-Instruct, Qwen2.5-7B-Instruct
+Race-condition fix (drain thread):
+  model.generate() returns before the TextIteratorStreamer's internal queue
+  is fully consumed by the drain thread.  A threading.Event (_drain_done)
+  is set only once the drain loop exits; _generate() waits on this event
+  before putting the None end-of-stream sentinel, so no tokens are dropped.
 
-Chat template handling:
-  Each model family uses different role names and special tokens.
-  HuggingFace tokenizers ship a built-in chat_template (Jinja2) that
-  applies_chat_template() uses automatically — switching the model ID is
-  enough to get the correct format.  The only exception is Gemma, which
-  uses "model" instead of "assistant" for the AI turn; get_assistant_role()
-  returns the correct role string for any model.
+Supported model families (see MODEL_FAMILIES for full list):
+  Gemma   – google/gemma-3-1b-it, gemma-3-4b-it, gemma-3-12b-it, …
+  Llama   – meta-llama/Llama-3.2-1B-Instruct, Llama-3.1-8B-Instruct, …
+  Mistral – mistralai/Mistral-7B-Instruct-v0.3
+  Phi     – microsoft/Phi-4-mini-instruct, Phi-3.5-mini-instruct
+  Qwen    – Qwen/Qwen2.5-1.5B-Instruct, Qwen2.5-7B-Instruct
+
+System-role handling:
+  Modern model families (Llama 3.1+, Phi-4, Qwen 2.5) support a native
+  "system" role in their chat template.  Gemma and some older families do
+  not; they require the system content to be embedded as a leading
+  user/assistant exchange.  _supports_system_role() probes the tokenizer
+  at load time and sets _system_role_supported so the right path is taken
+  in stream() without wasting context tokens on the fake exchange.
+
+Precision / dtype:
+  Loading in float32 is the default but wastes ~2× the VRAM.  When a GPU is
+  available, bfloat16 (on Ampere+) or float16 (on older GPUs / MPS) is used
+  automatically unless 4-bit quantisation is requested.
 
 Device selection (configured in Settings):
-  "auto"  → use CUDA GPU if available, then MPS (Apple Silicon), then CPU
+  "auto"  → CUDA if available, then MPS (Apple Silicon), then CPU
   "cpu"   → force CPU
   "cuda"  → force NVIDIA GPU
   "mps"   → force Apple Silicon GPU
@@ -38,7 +49,7 @@ import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from core.signal_lattice import SigKind, lattice
 from utils.config import cfg
@@ -98,6 +109,28 @@ def get_assistant_role(model_id: str) -> str:
     return "model" if "gemma" in model_id.lower() else "assistant"
 
 
+def _supports_system_role(tokenizer: Any) -> bool:
+    """
+    Probe the tokenizer's chat template for native 'system' role support.
+
+    Renders a minimal two-message conversation (system + user) using the
+    tokenizer's own Jinja2 template.  If the template raises an exception
+    (e.g. because it does not know the 'system' role) we fall back to the
+    fake user/assistant preamble approach.
+
+    This check runs once at load time so the overhead is negligible.
+    """
+    try:
+        probe = [
+            {"role": "system", "content": "sys"},
+            {"role": "user",   "content": "hi"},
+        ]
+        tokenizer.apply_chat_template(probe, tokenize=False)
+        return True
+    except Exception:
+        return False
+
+
 @dataclass
 class NexusResponse:
     text: str
@@ -134,6 +167,9 @@ class ModelNexus:
         self._model    = None
         self._tokenizer = None
         self._load_lock = threading.Lock()
+        # Set to True at load time when the tokenizer supports a native "system" role.
+        # When False, the system prompt is embedded as a leading user/assistant exchange.
+        self._system_role_supported: bool = False
 
     # ------------------------------------------------------------------
     # Lazy model loading
@@ -171,6 +207,13 @@ class ModelNexus:
 
         tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token)
 
+        # Probe the tokenizer once to determine if a native system role is
+        # supported.  Llama 3.1+, Phi-4, Qwen 2.5 support it; Gemma does not.
+        # Using the native system role avoids the fake user/assistant preamble
+        # and saves significant context tokens on every request.
+        system_role_ok = _supports_system_role(tokenizer)
+        log.info("Model %s native system role: %s", model_id, system_role_ok)
+
         load_kw: dict = {
             "token": hf_token,
             "low_cpu_mem_usage": True,
@@ -205,6 +248,25 @@ class ModelNexus:
             else:
                 load_kw["device_map"] = {"": device_pref}
 
+        # Select a reduced-precision dtype to cut VRAM usage ~50 % vs float32.
+        # bfloat16 is preferred for Ampere+ (wider dynamic range, no overflow
+        # risk); float16 is used on older CUDA devices and on Apple MPS.
+        # On CPU we stay in float32 because float16 is slower without hardware
+        # support.  Skip when 4-bit quantisation already controls the dtype.
+        if "quantization_config" not in load_kw:
+            effective_device = load_kw.get("device_map", {})
+            is_gpu = effective_device == "auto" or any(
+                str(v) not in ("cpu", "") for v in (
+                    [effective_device] if isinstance(effective_device, str)
+                    else effective_device.values()
+                )
+            )
+            if is_gpu and device_pref != "cpu":
+                if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+                    load_kw["torch_dtype"] = torch.bfloat16
+                else:
+                    load_kw["torch_dtype"] = torch.float16
+
         model = AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
         model.eval()
 
@@ -212,6 +274,7 @@ class ModelNexus:
         self._tokenizer = tokenizer
         self._model     = model
         self._model_id  = model_id
+        self._system_role_supported = system_role_ok
         log.info("Model ready: %s", model_id)
 
     # ------------------------------------------------------------------
@@ -272,15 +335,19 @@ class ModelNexus:
             ) from exc
 
         # Build conversation using the model's chat template.
-        # Most models use user/assistant alternation.  Gemma uses "model"
-        # instead of "assistant"; get_assistant_role() handles this distinction.
-        # The system context is prepended as a user/assistant exchange so the
-        # template renders correctly regardless of model family.
+        # When the tokenizer supports a native "system" role (detected at load
+        # time) we use it directly – this is more efficient and semantically
+        # correct.  For models that only support "user"/"assistant" (Gemma,
+        # some older checkpoints) we embed the system content as a leading
+        # user/assistant exchange so apply_chat_template() works correctly.
         asst_role = get_assistant_role(self._model_id)
         full_messages: list[dict] = []
         if system:
-            full_messages.append({"role": "user", "content": system})
-            full_messages.append({"role": asst_role, "content": "Understood."})
+            if self._system_role_supported:
+                full_messages.append({"role": "system", "content": system})
+            else:
+                full_messages.append({"role": "user",     "content": system})
+                full_messages.append({"role": asst_role,  "content": "Understood."})
         full_messages.extend(messages)
 
         tokenizer = self._tokenizer
@@ -321,11 +388,20 @@ class ModelNexus:
         # None is the end-of-stream sentinel.
         token_queue: asyncio.Queue[str | None] = asyncio.Queue()
         gen_errors: list[Exception] = []
+        # _drain_done signals that _drain_streamer has finished consuming all
+        # tokens from the streamer before we put the None sentinel.  Without
+        # this event, model.generate() can return and _generate() can put None
+        # into the queue before _drain_streamer emits the very last tokens,
+        # causing those final tokens to be silently dropped.
+        _drain_done = threading.Event()
 
         def _generate() -> None:
             try:
                 with torch.no_grad():
                     model.generate(**gen_kwargs)
+                # Wait up to 10 s for the drain thread to finish flushing.
+                # In normal operation this completes in milliseconds.
+                _drain_done.wait(timeout=10.0)
             except Exception as exc:
                 gen_errors.append(exc)
             finally:
@@ -342,6 +418,8 @@ class ModelNexus:
                         source="model_nexus",
                     )
                     loop.call_soon_threadsafe(token_queue.put_nowait, text)
+            # Signal that the drain is complete so _generate() can put None.
+            _drain_done.set()
 
         gen_thread   = threading.Thread(target=_generate,       daemon=True)
         drain_thread = threading.Thread(target=_drain_streamer, daemon=True)

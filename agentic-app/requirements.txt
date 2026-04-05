@@ -1,19 +1,24 @@
 # Agentic - Python Dependencies
 # Install with: pip install -r requirements.txt
 
-# HuggingFace model inference (Gemma runs directly in-process, no server needed)
-transformers>=4.40.0
-torch>=2.2.0
-accelerate>=0.29.0
+# HuggingFace model inference – runs entirely in-process, no server needed.
+# transformers 4.47+ brings Gemma 3, Llama 3.3, Phi-4, Qwen 2.5 chat templates
+# and improved bfloat16 / flash-attention support.
+transformers>=4.47.0
+# PyTorch 2.5 adds torch.compile improvements and better MPS (Apple Silicon)
+# support.  2.6 is the latest stable as of early 2026.
+torch>=2.5.0
+# accelerate 1.2 adds device_map="auto" improvements for multi-GPU and MPS.
+accelerate>=1.2.0
 
 # Optional: 4-bit quantization (GPU only, requires compatible CUDA/ROCm)
-# bitsandbytes>=0.43.0
+# bitsandbytes>=0.44.0
 
-# HuggingFace Hub helpers (cache check in Settings)
-huggingface_hub>=0.22.0
+# HuggingFace Hub helpers (model card fetch, cache management in Settings)
+huggingface_hub>=0.27.0
 
-# HTTP client for the web-fetch skill
-httpx>=0.27.0
+# Async HTTP client for the web-fetch skill
+httpx>=0.28.0
 
-# PyInstaller for creating the downloadable desktop app
-pyinstaller>=6.6.0
+# PyInstaller for the standalone desktop app bundle
+pyinstaller>=6.11.0
