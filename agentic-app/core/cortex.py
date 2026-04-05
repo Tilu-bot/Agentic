@@ -271,6 +271,13 @@ class Cortex:
         else:
             log.warning("ReAct: reached max iterations (%d)", max_iterations)
 
+        # Guard against a completely empty response (e.g. the model emitted
+        # zero tokens and no exception was raised).  This is extremely rare
+        # but we must not write an empty assistant turn to fluid memory.
+        if not final_response:
+            final_response = "[No response generated]"
+            log.warning("ReAct: final_response is empty, substituting placeholder")
+
         # ── 6. Write final answer to fluid memory ────────────────────────
         self._memory.fluid_write("assistant", final_response)
 

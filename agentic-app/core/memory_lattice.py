@@ -135,7 +135,9 @@ class MemoryLattice:
 
         scored: list[tuple[float, int, FluidEntry]] = []
         for i, entry in enumerate(self._fluid):
-            recency    = i / max(n - 1, 1)          # 0 = oldest, 1 = newest
+            # When there's only one entry, it is both oldest and newest;
+            # treat its recency as 1.0 so it is never penalised.
+            recency    = (i / (n - 1)) if n > 1 else 1.0
             importance = _score_importance([entry])  # 0.0 – 1.0
             keep_score = 0.6 * recency + 0.4 * importance
             scored.append((keep_score, i, entry))
