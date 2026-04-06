@@ -57,7 +57,7 @@ def _safe_path(raw: str) -> Path:
     return p
 
 
-def _check_exists(p: Path, suffix_hint: str) -> None:
+def _check_exists(p: Path) -> None:
     if not p.exists():
         raise FileNotFoundError(f"File not found: {p}")
     if not p.is_file():
@@ -100,7 +100,7 @@ class ReadPdfSkill(SkillBase):
             )
 
         p = _safe_path(path)
-        _check_exists(p, ".pdf")
+        _check_exists(p)
 
         reader = PdfReader(str(p))
         total_pages = len(reader.pages)
@@ -171,7 +171,7 @@ class ReadExcelSkill(SkillBase):
             )
 
         p = _safe_path(path)
-        _check_exists(p, ".xlsx")
+        _check_exists(p)
 
         wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
 
@@ -259,7 +259,7 @@ class ReadWordSkill(SkillBase):
             )
 
         p = _safe_path(path)
-        _check_exists(p, ".docx")
+        _check_exists(p)
 
         doc = Document(str(p))
         parts: list[str] = []
@@ -326,14 +326,13 @@ class ReadPptxSkill(SkillBase):
     ) -> str:
         try:
             from pptx import Presentation
-            from pptx.util import Pt
         except ImportError:
             raise RuntimeError(
                 "python-pptx is required for PowerPoint reading. Run: pip install python-pptx"
             )
 
         p = _safe_path(path)
-        _check_exists(p, ".pptx")
+        _check_exists(p)
 
         prs = Presentation(str(p))
         total = len(prs.slides)
