@@ -3,11 +3,18 @@
 PyInstaller build specification for the Agentic desktop app.
 
 Usage:
-    pip install pyinstaller transformers torch accelerate httpx huggingface_hub
     cd agentic-app
     pyinstaller agentic.spec
 
-Output: dist/Agentic/ (folder mode) or dist/Agentic.exe (Windows one-file)
+Output:
+  • dist/Agentic/          — folder bundle (used by build_installer.bat)
+  • dist/Agentic/Agentic.exe — the main executable inside the bundle
+
+To produce a single-file Windows installer (.exe with wizard + shortcuts):
+    build_installer.bat     (Windows only, requires Inno Setup 6)
+
+To produce a standalone portable executable (no installer wizard):
+    pyinstaller agentic.spec --onefile   (slower first-launch; no shortcuts)
 """
 
 import sys
@@ -39,6 +46,7 @@ a = Analysis(
         "skills.web_reader",
         "skills.code_runner",
         "skills.memory_ops",
+        "skills.doc_reader",
         "ui.app",
         "ui.chat_view",
         "ui.task_panel",
@@ -78,6 +86,11 @@ a = Analysis(
         "h11",
         "idna",
         "sniffio",
+        # Document reader skill (PDF, Excel, Word, PowerPoint)
+        "pypdf",
+        "openpyxl",
+        "docx",
+        "pptx",
     ],
     hookspath=[],
     hooksconfig={},
@@ -85,6 +98,8 @@ a = Analysis(
     excludes=[
         # Exclude heavy unused packages
         "matplotlib", "pandas", "scipy",
+        # PIL/Pillow: only needed by build-time assets/generate_icon_ico.py,
+        # not by the running app — keep it out of the bundle.
         "PIL", "cv2", "tensorflow",
         "IPython", "notebook", "jupyter",
     ],
