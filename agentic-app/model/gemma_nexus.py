@@ -359,6 +359,25 @@ class ModelNexus:
         """True when the loaded model's tokenizer supports native tool calling."""
         return self._tool_calls_supported
 
+    def count_tokens(self, text: str) -> int:
+        """
+        Return the number of tokens in *text* using the loaded tokenizer.
+
+        When the model has not been loaded yet, falls back to the
+        ``chars / 4`` heuristic (English-prose average for the GPT/LLaMA
+        family).  The heuristic is used only for the first pre-load
+        context-window check; all subsequent calls during an active
+        deliberation use the real tokenizer.
+
+        Note: the heuristic can be off by 2× for code-heavy input or
+        non-English text where per-token character counts differ significantly
+        from the 4-chars average.  Once the model is loaded the actual
+        tokenizer is always used, so this inaccuracy is transient.
+        """
+        if self._tokenizer is not None:
+            return len(self._tokenizer.encode(text))
+        return max(1, len(text) // 4)
+
     def list_models(self) -> list[str]:
         return list(KNOWN_MODELS)
 

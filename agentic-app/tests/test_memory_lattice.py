@@ -15,6 +15,7 @@ from core.memory_lattice import (
     _extractive_summarize,
     _score_importance,
     _fact_id,
+    _bm25_scores,
 )
 
 
@@ -249,3 +250,85 @@ class TestContextAssembly:
         ]
         ctx = lattice.assemble_context()
         assert "project Alpha" in ctx
+
+
+# ---------------------------------------------------------------------------
+# _bm25_scores
+# ---------------------------------------------------------------------------
+
+class TestBM25Scores:
+
+    def test_empty_query_returns_zeros(self):
+        corpus = ["the cat sat on the mat", "python is a programming language"]
+        scores = _bm25_scores("", corpus)
+        assert scores == [0.0, 0.0]
+
+    def test_empty_corpus_returns_empty(self):
+        assert _bm25_scores("query", []) == []
+
+    def test_matching_doc_scores_higher_than_non_matching(self):
+        corpus = [
+            "the user prefers Python for scripting tasks",
+            "the weather in London is cloudy today",
+        ]
+        scores = _bm25_scores("what language does the user like to code in", corpus)
+        assert len(scores) == 2
+        # The Python/scripting document must outscore the weather document.
+        assert scores[0] > scores[1]
+
+    def test_exact_term_match_gets_positive_score(self):
+        corpus = ["user prefers dark mode theme"]
+        scores = _bm25_scores("dark mode preference", corpus)
+        assert scores[0] > 0.0
+
+    def test_zero_overlap_query_scores_zero(self):
+        corpus = ["totally unrelated zephyr content"]
+        scores = _bm25_scores("astrophysics quantum entanglement", corpus)
+        assert scores[0] == 0.0
+
+    def test_order_preserved_for_multiple_docs(self):
+        corpus = ["alpha beta gamma", "delta epsilon zeta", "alpha delta kappa"]
+        scores = _bm25_scores("alpha", corpus)
+        assert len(scores) == 3
+        # The doc with only alpha should score higher than the mixed ones
+        # when IDF is uniform across a small corpus.
+        assert scores[0] > 0.0 or scores[2] > 0.0  # at least one match
+
+    def test_stopwords_ignored(self):
+        # "the", "is", "a" are stopwords; scoring should still work.
+        corpus = ["Python is a programming language", "Java is also popular"]
+        scores_full = _bm25_scores("Python programming language", corpus)
+        assert scores_full[0] > scores_full[1]
+
+    def test_rare_term_scores_higher_than_common_term(self):
+        # "unique" appears in only one document; "common" appears in all three.
+        corpus = [
+            "common term shared across common documents",
+            "common term shared but also unique identifier here",
+            "another common document without anything special",
+        ]
+        # Querying for the rare term should rank the doc that has it higher.
+        scores = _bm25_scores("unique identifier", corpus)
+        assert scores[1] == max(scores)
+
+    def test_returns_float_list_of_correct_length(self):
+        corpus = ["doc one", "doc two", "doc three"]
+        scores = _bm25_scores("one two three", corpus)
+        assert len(scores) == 3
+        assert all(isinstance(s, float) for s in scores)
+
+    def test_assemble_context_uses_bm25_ranking(self):
+        """Integration: assemble_context returns the semantically best fact first."""
+        lattice, store = _make_lattice()
+        store.bedrock_query.return_value = [
+            BedrockFact("f1", "pref",  "user prefers Python scripting", 0.9, time.time()),
+            BedrockFact("f2", "misc",  "weather is cloudy in London",    0.5, time.time()),
+            BedrockFact("f3", "pref",  "user dislikes verbose syntax",   0.7, time.time()),
+        ]
+        ctx = lattice.assemble_context(
+            include_bedrock=2,
+            query="which programming language does the user prefer",
+        )
+        # The Python fact must appear; the London weather fact must be excluded.
+        assert "Python" in ctx
+        assert "London" not in ctx

@@ -48,11 +48,22 @@ _REACT_ITERATION_STATUS = (
     "\n\n[⚙ Skills executed: {skill_names} — reasoning continues…]\n\n"
 )
 
-# Approximate characters per token for the context-window overflow estimator.
-# GPT/LLaMA family tokenizers average ~4 chars/token for English prose.
-_CHARS_PER_TOKEN = 4
+# Message injected into the conversation when react_max_iterations is exhausted
+# but the model is still calling tools (no clean final answer was produced).
+# This Reflexion step (Shinn et al., 2023) forces one final synthesis pass with
+# tools disabled so the model generates a direct answer from accumulated evidence
+# instead of looping further or returning a response that is full of tool calls.
+_REFLEXION_PROMPT = (
+    "You have reached the maximum number of reasoning steps and cannot call "
+    "any more tools. Based on everything you have gathered so far, please "
+    "synthesize a clear, direct final answer for the user. "
+    "Do not invoke any tools or skills in your response."
+)
 
-# Fraction of the context limit at which we warn instead of hard-stop.
+# Status token emitted to the streaming UI when Reflexion is triggered.
+_REFLEXION_STATUS = "\n\n[↺ Reflexion: synthesizing findings into a final answer…]\n\n"
+
+# Fraction of the context limit at which we warn and trim the oldest messages.
 # 0.85 leaves ~15 % headroom for the model's reply.
 _CONTEXT_WARN_RATIO = 0.85
 
@@ -353,7 +364,44 @@ class Cortex:
             messages.append({"role": "user", "content": obs_text})
 
         else:
-            log.warning("ReAct: reached max iterations (%d)", max_iterations)
+            log.warning(
+                "ReAct: reached max iterations (%d) — triggering Reflexion step",
+                max_iterations,
+            )
+            # ── Reflexion (Shinn et al., 2023) ───────────────────────────
+            # The loop exhausted all iterations without reaching a final answer
+            # (every iteration ended with tool calls).  Rather than returning
+            # the last tool-call response verbatim, we do one extra no-tool
+            # generation pass so the model synthesises its findings into a
+            # coherent direct answer.
+            asst_role = get_assistant_role(cfg.get("model_id", ""))
+            messages.append({"role": asst_role, "content": final_response})
+            messages.append({"role": "user", "content": _REFLEXION_PROMPT})
+            if self._on_token:
+                try:
+                    self._on_token(_REFLEXION_STATUS)
+                except Exception:
+                    pass
+            reflect_parts: list[str] = []
+            try:
+                async for token in self._nexus.stream(
+                    messages,
+                    system=system_prompt,
+                    temperature=0.7,
+                    max_tokens=2048,
+                    tools_schema=None,  # force direct answer, no tool calls
+                ):
+                    reflect_parts.append(token)
+                    if self._on_token:
+                        try:
+                            self._on_token(token)
+                        except Exception:
+                            pass
+            except Exception as exc:
+                log.exception("Reflexion stream failed: %s", exc)
+                reflect_parts.append(f"\n[Reflexion error: {exc}]")
+            if reflect_parts:
+                final_response = "".join(reflect_parts)
 
         # Guard against a completely empty response (e.g. the model emitted
         # zero tokens and no exception was raised).  This is extremely rare
@@ -383,15 +431,18 @@ class Cortex:
     # Context-window helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _estimate_tokens(messages: list[dict], system_prompt: str) -> int:
-        """Estimate the prompt token count via the chars-per-token heuristic."""
+    def _estimate_tokens(self, messages: list[dict], system_prompt: str) -> int:
+        """
+        Count prompt tokens using the loaded tokenizer (accurate), falling
+        back to the chars-per-token heuristic when the model is not yet loaded.
+        """
         return (
-            sum(len(m.get("content", "")) for m in messages) + len(system_prompt)
-        ) // _CHARS_PER_TOKEN
+            sum(self._nexus.count_tokens(m.get("content", "")) for m in messages)
+            + self._nexus.count_tokens(system_prompt)
+        )
 
-    @staticmethod
     def _trim_messages_to_context(
+        self,
         messages: list[dict],
         system_prompt: str,
         context_limit: int,
@@ -401,19 +452,21 @@ class Cortex:
         token count is within *context_limit*.
 
         The current user turn (last element) is always preserved so that the
-        model always sees the latest request.  Returns the final estimated
-        token count after trimming.
+        model always sees the latest request.  Returns the final token count
+        after trimming.
         """
         while len(messages) > 1:
             tokens = (
-                sum(len(m.get("content", "")) for m in messages) + len(system_prompt)
-            ) // _CHARS_PER_TOKEN
+                sum(self._nexus.count_tokens(m.get("content", "")) for m in messages)
+                + self._nexus.count_tokens(system_prompt)
+            )
             if tokens <= context_limit:
                 break
             messages.pop(0)
         return (
-            sum(len(m.get("content", "")) for m in messages) + len(system_prompt)
-        ) // _CHARS_PER_TOKEN
+            sum(self._nexus.count_tokens(m.get("content", "")) for m in messages)
+            + self._nexus.count_tokens(system_prompt)
+        )
 
     # ------------------------------------------------------------------
     # Skill execution primitive

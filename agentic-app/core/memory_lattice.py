@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import time
 import uuid
@@ -265,11 +266,15 @@ class MemoryLattice:
         bedrock_facts = self.bedrock_query(limit=candidate_limit)
         if bedrock_facts:
             if query:
-                bedrock_facts = sorted(
-                    bedrock_facts,
-                    key=lambda f: _score_relevance(query, f.text),
-                    reverse=True,
-                )[:include_bedrock]
+                scores = _bm25_scores(query, [f.text for f in bedrock_facts])
+                bedrock_facts = [
+                    fact
+                    for _, fact in sorted(
+                        zip(scores, bedrock_facts),
+                        key=lambda pair: pair[0],
+                        reverse=True,
+                    )
+                ][:include_bedrock]
             parts.append("=== Known Facts ===")
             for f in bedrock_facts:
                 parts.append(f"[{f.category}] {f.text}")
@@ -424,18 +429,32 @@ def _score_importance(entries: list[FluidEntry]) -> float:
     return min(1.0, score)
 
 
-def _score_relevance(query: str, text: str) -> float:
+def _bm25_scores(query: str, corpus: list[str]) -> list[float]:
     """
-    Keyword-overlap relevance score between *query* and a memory *text*.
+    BM25 relevance scores for *query* against each document in *corpus*.
 
-    Returns a float in [0.0, 1.0] where 1.0 means every meaningful query
-    word appears in the text.  Common stopwords are ignored so that short
-    but precise queries ("user's name?") are scored faithfully.
+    BM25 is the standard probabilistic information-retrieval ranking function
+    used by Elasticsearch, Lucene, and most production search engines.  It
+    substantially outperforms plain keyword-overlap by correctly accounting
+    for:
+      • Term frequency saturation  – a term appearing 10× counts more than 1×,
+        but not 10× more; repeated terms give diminishing returns.
+      • Inverse document frequency – rare terms that appear in few facts are
+        scored higher than common terms that appear in every fact.
+      • Document-length normalisation – a one-word fact that matches the query
+        is scored proportionally more than a 50-word fact with the same match.
 
-    This is intentionally lightweight (no embeddings, no ML) so it adds
-    zero latency to the deliberation cycle.  For the Bedrock tier – which
-    typically contains O(100) short facts – linear scanning is negligible.
+    Parameters
+    ----------
+    k1 : 1.5   – term-frequency saturation point (standard value).
+    b  : 0.75  – length-normalisation strength (standard value).
+
+    Returns a list of floats in the same order as *corpus*.  All zeros when
+    *query* is empty or *corpus* is empty.
     """
+    if not query or not corpus:
+        return [0.0] * len(corpus)
+
     _STOPWORDS: frozenset[str] = frozenset({
         "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
         "i", "you", "he", "she", "it", "we", "they", "me", "him", "her",
@@ -443,14 +462,52 @@ def _score_relevance(query: str, text: str) -> float:
         "at", "by", "from", "on", "as", "but", "not", "what", "how",
         "do", "does", "did", "can", "could", "will", "would", "should",
     })
-    if not query or not text:
-        return 0.0
 
-    def _words(s: str) -> set[str]:
-        return {w.lower().strip(".,!?;:\"'()[]{}") for w in s.split()} - _STOPWORDS
+    k1 = 1.5
+    b  = 0.75
 
-    q_words = _words(query)
-    if not q_words:
-        return 0.0
-    t_words = _words(text)
-    return len(q_words & t_words) / len(q_words)
+    def _tokenize(text: str) -> list[str]:
+        return [
+            w.lower().strip(".,!?;:\"'()[]{}") for w in text.split()
+            if w.lower().strip(".,!?;:\"'()[]{}") not in _STOPWORDS
+        ]
+
+    q_terms = _tokenize(query)
+    if not q_terms:
+        return [0.0] * len(corpus)
+
+    doc_tokens   = [_tokenize(d) for d in corpus]
+    doc_lengths  = [len(toks) for toks in doc_tokens]
+    n            = len(corpus)
+    avgdl        = sum(doc_lengths) / max(n, 1)
+
+    # IDF: inverse document frequency for each unique query term.
+    # Using the smoothed BM25 IDF formula: log((N - df + 0.5) / (df + 0.5) + 1)
+    # which keeps IDF positive even when df == N.
+    df: dict[str, int] = {
+        term: sum(1 for toks in doc_tokens if term in toks)
+        for term in set(q_terms)
+    }
+    idf: dict[str, float] = {
+        term: math.log((n - count + 0.5) / (count + 0.5) + 1.0)
+        for term, count in df.items()
+    }
+
+    scores: list[float] = []
+    for i, toks in enumerate(doc_tokens):
+        dl = doc_lengths[i]
+        # Build term-frequency map for this document.
+        tf: dict[str, int] = {}
+        for t in toks:
+            tf[t] = tf.get(t, 0) + 1
+
+        doc_score = 0.0
+        for term in q_terms:
+            f = tf.get(term, 0)
+            if f == 0:
+                continue
+            tf_norm   = f * (k1 + 1) / (f + k1 * (1 - b + b * dl / max(avgdl, 1)))
+            doc_score += idf.get(term, 0.0) * tf_norm
+        scores.append(doc_score)
+
+    return scores
