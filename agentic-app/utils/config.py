@@ -14,6 +14,79 @@ from utils.logger import build_logger
 
 log = build_logger("agentic.config")
 
+# Schema defining the expected type and optional constraints for each config key.
+# "type"    → Python type the value must be coerced to.
+# "choices" → set of allowed string values (strings only).
+# "min"/"max" → inclusive integer range.
+_CONFIG_SCHEMA: dict[str, dict] = {
+    "model_id":             {"type": str},
+    "hf_token":             {"type": str},
+    "device":               {"type": str, "choices": {"auto", "cpu", "cuda", "mps"}},
+    "quantize_4bit":        {"type": bool},
+    "theme":                {"type": str, "choices": {"dark", "light"}},
+    "font_size":            {"type": int, "min": 8,  "max": 32},
+    "max_parallel_tasks":   {"type": int, "min": 1,  "max": 32},
+    "working_memory_limit": {"type": int, "min": 5,  "max": 200},
+    "streaming_enabled":    {"type": bool},
+    "skill_timeout_s":      {"type": int, "min": 5,  "max": 300},
+    "log_level":            {"type": str, "choices": {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}},
+    "react_max_iterations": {"type": int, "min": 1,  "max": 20},
+    "context_limit_tokens": {"type": int, "min": 512, "max": 131072},
+}
+
+
+def _validate_value(key: str, value: Any) -> tuple[Any, str | None]:
+    """
+    Coerce *value* to the declared type for *key* and check constraints.
+
+    Returns ``(coerced_value, None)`` on success or
+    ``(value, error_message)`` if the value cannot be coerced or violates
+    a constraint.  Unknown keys pass through unchanged with no error.
+    """
+    schema = _CONFIG_SCHEMA.get(key)
+    if schema is None:
+        return value, None
+
+    expected_type = schema["type"]
+
+    # Coerce booleans before numeric check (bool is a subclass of int).
+    if expected_type is bool:
+        if isinstance(value, bool):
+            coerced: Any = value
+        elif isinstance(value, int):
+            coerced = bool(value)
+        elif isinstance(value, str):
+            if value.lower() in ("true", "1", "yes"):
+                coerced = True
+            elif value.lower() in ("false", "0", "no"):
+                coerced = False
+            else:
+                return value, f"Config '{key}': cannot coerce {value!r} to bool"
+        else:
+            return value, f"Config '{key}': expected bool, got {type(value).__name__}"
+    elif expected_type is int:
+        try:
+            coerced = int(value)
+        except (ValueError, TypeError):
+            return value, f"Config '{key}': expected int, got {value!r}"
+        if "min" in schema and coerced < schema["min"]:
+            return value, f"Config '{key}': {coerced} < min {schema['min']}"
+        if "max" in schema and coerced > schema["max"]:
+            return value, f"Config '{key}': {coerced} > max {schema['max']}"
+    elif expected_type is str:
+        if not isinstance(value, str):
+            return value, f"Config '{key}': expected str, got {type(value).__name__}"
+        coerced = value
+        if "choices" in schema and coerced not in schema["choices"]:
+            return value, (
+                f"Config '{key}': {coerced!r} not in {sorted(schema['choices'])}"
+            )
+    else:
+        coerced = value
+
+    return coerced, None
+
+
 _DEFAULT: dict[str, Any] = {
     "model_id": "google/gemma-3-1b-it",
     "hf_token": "",
@@ -31,6 +104,10 @@ _DEFAULT: dict[str, Any] = {
     # results back to the model before the next iteration.  6 covers most
     # multi-step tasks while preventing runaway loops.
     "react_max_iterations": 6,
+    # Approximate token limit for the assembled prompt (system + messages).
+    # Used for the context-overflow warning; does not truncate automatically.
+    # Most small open-source models support 4096–8192 tokens.
+    "context_limit_tokens": 4096,
 }
 
 
@@ -80,13 +157,24 @@ class Config:
             return self._data.get(key, fallback)
 
     def set(self, key: str, value: Any) -> None:
+        coerced, err = _validate_value(key, value)
+        if err:
+            log.warning("Config validation rejected set(%s): %s", key, err)
+            return
         with self._lock:
-            self._data[key] = value
+            self._data[key] = coerced
             self._save()
 
     def update(self, mapping: dict[str, Any]) -> None:
+        validated: dict[str, Any] = {}
+        for key, value in mapping.items():
+            coerced, err = _validate_value(key, value)
+            if err:
+                log.warning("Config validation rejected update(%s): %s", key, err)
+            else:
+                validated[key] = coerced
         with self._lock:
-            self._data.update(mapping)
+            self._data.update(validated)
             self._save()
 
     def all(self) -> dict[str, Any]:

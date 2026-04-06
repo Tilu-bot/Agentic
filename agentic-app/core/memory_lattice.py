@@ -42,6 +42,7 @@ class FluidEntry:
     text: str
     ts: float = 0.0
     tags: list[str] = field(default_factory=list)
+    entry_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def __post_init__(self) -> None:
         if self.ts == 0.0:
@@ -88,6 +89,7 @@ class MemoryLattice:
         self._fluid_limit = fluid_limit
         self._lock = Lock()
         self._fluid: list[FluidEntry] = []
+        self._restore_fluid()
 
     # ------------------------------------------------------------------
     # FLUID tier – in-memory sliding window
@@ -97,6 +99,15 @@ class MemoryLattice:
         entry = FluidEntry(role=role, text=text, tags=tags or [])
         with self._lock:
             self._fluid.append(entry)
+            # Persist immediately so a crash doesn't lose this turn.
+            self._store.fluid_insert(
+                entry_id=entry.entry_id,
+                session_id=self._session_id,
+                role=entry.role,
+                text=entry.text,
+                tags=entry.tags,
+                ts=entry.ts,
+            )
             if len(self._fluid) > self._fluid_limit:
                 self._evict_to_crystal()
 
@@ -109,6 +120,25 @@ class MemoryLattice:
             if self._fluid:
                 self._crystallize(self._fluid)
             self._fluid = []
+            self._store.fluid_clear(self._session_id)
+
+    def _restore_fluid(self) -> None:
+        """Reload any persisted fluid entries from the previous session run."""
+        rows = self._store.fluid_restore(self._session_id)
+        for r in rows:
+            entry = FluidEntry(
+                role=r["role"],
+                text=r["text"],
+                tags=r["tags"],
+                ts=r["ts"],
+                entry_id=r["entry_id"],
+            )
+            self._fluid.append(entry)
+        if rows:
+            log.info(
+                "Restored %d fluid entries for session %s",
+                len(rows), self._session_id[:8],
+            )
 
     def _evict_to_crystal(self) -> None:
         """
@@ -147,6 +177,8 @@ class MemoryLattice:
         to_evict   = [e for i, e in enumerate(self._fluid) if i in evict_set]
         self._fluid = [e for i, e in enumerate(self._fluid) if i not in evict_set]
         self._crystallize(to_evict)
+        # Remove the now-crystallised entries from the persistence layer.
+        self._store.fluid_delete_entries([e.entry_id for e in to_evict])
 
     # ------------------------------------------------------------------
     # CRYSTAL tier – compressed episodic records
@@ -160,7 +192,7 @@ class MemoryLattice:
             f"[{e.role.upper()}] {e.text[:400]}" for e in entries
         )
         tags: list[str] = list({t for e in entries for t in e.tags})
-        summary = _truncate_to_sentences(combined, max_chars=600)
+        summary = _extractive_summarize(combined, max_chars=600)
         record = CrystalRecord(
             record_id=uuid.uuid4().hex,
             session_id=self._session_id,
@@ -262,6 +294,14 @@ class MemoryLattice:
 _EVICT_RECENCY_WEIGHT    = 0.6
 _EVICT_IMPORTANCE_WEIGHT = 0.4
 
+# Shared keyword set used by both _score_importance and _extractive_summarize.
+_IMPORTANCE_KEYWORDS: frozenset[str] = frozenset({
+    "error", "fail", "important", "critical", "remember",
+    "note", "save", "key", "must", "should", "prefer",
+    "always", "never", "warning", "todo", "urgent", "issue",
+    "confirm", "agree", "decision", "goal", "requirement",
+})
+
 
 def _fact_id(category: str, text: str) -> str:
     """
@@ -275,26 +315,63 @@ def _fact_id(category: str, text: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
 
 
-def _truncate_to_sentences(text: str, max_chars: int = 600) -> str:
+def _extractive_summarize(text: str, max_chars: int = 600) -> str:
     """
-    Extractive truncation that preserves sentence boundaries.
+    Importance-scored extractive summarizer.
 
-    Splits on sentence-ending punctuation and accumulates whole sentences
-    until *max_chars* would be exceeded, then stops.  The result is always
-    a grammatically complete prefix of the source text rather than a raw
-    character slice.  This is intentionally NOT a summarizer – no
-    information is reordered or generated.
+    Splits *text* into sentences and scores each one on three signals:
+      • Keyword density  – sentences containing important words score higher.
+      • Position weight  – first and last sentences are given a bonus because
+                           they tend to carry the topic statement and conclusion.
+      • Content bonuses  – code fences (triple backtick) and questions add bonus points
+                           because they encode high-information content.
+
+    The top-scoring sentences are selected greedily (largest score first)
+    until *max_chars* would be exceeded.  Selected sentences are then
+    re-emitted in their *original order* so the summary reads naturally.
+
+    This replaces a pure character-truncation approach and produces
+    higher-quality crystal records, especially for long mixed conversations.
     """
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-    result: list[str] = []
+    if not sentences:
+        return text[:max_chars]
+
+    n = len(sentences)
+
+    def _sentence_score(idx: int, s: str) -> float:
+        words = [w.strip(".,!?;:'\"()[]{}").lower() for w in s.split()]
+        kw_hits = sum(1 for w in words if w in _IMPORTANCE_KEYWORDS)
+        kw_score = kw_hits / max(len(words), 1)
+        # First and last sentences carry the topic / conclusion.
+        pos_score = 1.0 if idx == 0 else (0.8 if idx == n - 1 else 0.5)
+        code_bonus = 0.3 if "```" in s else 0.0
+        q_bonus    = 0.1 if "?" in s else 0.0
+        return kw_score + pos_score + code_bonus + q_bonus
+
+    scored = sorted(
+        ((idx, s, _sentence_score(idx, s)) for idx, s in enumerate(sentences)),
+        key=lambda x: x[2],
+        reverse=True,
+    )
+
+    selected: set[int] = set()
     total = 0
-    for s in sentences:
-        if total + len(s) <= max_chars:
-            result.append(s)
-            total += len(s)
-        else:
+    for idx, s, _ in scored:
+        if total + len(s) + 1 <= max_chars:
+            selected.add(idx)
+            total += len(s) + 1
+        if total >= max_chars:
             break
-    return " ".join(result) if result else text[:max_chars]
+
+    if not selected:
+        # Fallback: the single highest-scoring sentence, truncated at a word
+        # boundary to avoid cutting mid-word.
+        best = scored[0][1][:max_chars] if scored else text[:max_chars]
+        last_space = best.rfind(" ")
+        return best[:last_space] if last_space > 0 else best
+
+    return " ".join(sentences[i] for i in sorted(selected))
 
 
 def _score_importance(entries: list[FluidEntry]) -> float:
@@ -314,12 +391,7 @@ def _score_importance(entries: list[FluidEntry]) -> float:
     The baseline of 0.2 ensures that every batch receives at least minimal
     priority; the cap of 1.0 prevents runaway scores.
     """
-    _KEYWORDS = {
-        "error", "fail", "important", "critical", "remember",
-        "note", "save", "key", "must", "should", "prefer",
-        "always", "never", "warning", "todo", "urgent", "issue",
-        "confirm", "agree", "decision", "goal", "requirement",
-    }
+    _KEYWORDS = _IMPORTANCE_KEYWORDS
     score = 0.2
     total_chars = 0
     user_turns = 0

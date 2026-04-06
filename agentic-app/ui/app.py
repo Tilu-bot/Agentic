@@ -192,6 +192,7 @@ class AgenticApp(tk.Tk):
         lattice.on(SigKind.DELIBERATION_END,   self._on_deliberation_end)
         lattice.on(SigKind.REACT_ITERATION,    self._on_react_iteration)
         lattice.on(SigKind.MODEL_ERROR,        self._on_model_error)
+        lattice.on(SigKind.MODEL_LOADING,      self._on_model_loading)
 
         # Build views
         self._build_views()
@@ -285,6 +286,31 @@ class AgenticApp(tk.Tk):
         if hasattr(self, "_chat_view"):
             self._chat_view.push_token(f"\n[Model error: {error}]")
             self._chat_view.finish_streaming()
+
+    def _on_model_loading(self, sig: Any) -> None:
+        """Update the status bar with model loading progress."""
+        stage    = sig.payload.get("stage", "")
+        model_id = sig.payload.get("model_id", "model")
+        # Show only the short name (last component of the HF repo path).
+        short = model_id.split("/")[-1] if "/" in model_id else model_id
+        if stage == "start":
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(f"Loading {short}…", busy=True)
+        elif stage == "tokenizer":
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(f"Loading tokenizer: {short}…", busy=True)
+        elif stage == "weights":
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(f"Loading weights: {short}…", busy=True)
+        elif stage == "done":
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status("Model ready", busy=False)
+                self._chat_view.append_info(f"✓ Model loaded: {model_id}")
+        elif stage == "error":
+            error = sig.payload.get("error", "unknown error")
+            log.error("Model load failed: %s – %s", model_id, error)
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(f"Model load failed: {error[:60]}", busy=False)
 
     # ------------------------------------------------------------------
     # Session management

@@ -227,16 +227,31 @@ class ModelNexus:
             "Loading model: %s (device=%s, 4bit=%s)",
             model_id, device_pref, quantize_4bit,
         )
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {"stage": "start", "model_id": model_id},
+            source="model_nexus",
+        )
 
         try:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError as exc:
+            lattice.emit_kind(
+                SigKind.MODEL_LOADING,
+                {"stage": "error", "model_id": model_id, "error": str(exc)},
+                source="model_nexus",
+            )
             raise RuntimeError(
                 "transformers and torch are required.\n"
                 "Run: pip install transformers torch accelerate"
             ) from exc
 
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {"stage": "tokenizer", "model_id": model_id},
+            source="model_nexus",
+        )
         tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token)
 
         # Probe the tokenizer once to determine if a native system role is
@@ -303,7 +318,20 @@ class ModelNexus:
                 else:
                     load_kw["torch_dtype"] = torch.float16
 
-        model = AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {"stage": "weights", "model_id": model_id},
+            source="model_nexus",
+        )
+        try:
+            model = AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
+        except Exception as exc:
+            lattice.emit_kind(
+                SigKind.MODEL_LOADING,
+                {"stage": "error", "model_id": model_id, "error": str(exc)},
+                source="model_nexus",
+            )
+            raise
         model.eval()
 
         # Swap atomically so concurrent reads are never partially-initialised
@@ -313,6 +341,11 @@ class ModelNexus:
         self._system_role_supported = system_role_ok
         self._tool_calls_supported  = tool_calls_ok
         log.info("Model ready: %s", model_id)
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {"stage": "done", "model_id": model_id},
+            source="model_nexus",
+        )
 
     # ------------------------------------------------------------------
     # Availability

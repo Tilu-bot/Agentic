@@ -48,6 +48,14 @@ _REACT_ITERATION_STATUS = (
     "\n\n[⚙ Skills executed: {skill_names} — reasoning continues…]\n\n"
 )
 
+# Approximate characters per token for the context-window overflow estimator.
+# GPT/LLaMA family tokenizers average ~4 chars/token for English prose.
+_CHARS_PER_TOKEN = 4
+
+# Fraction of the context limit at which we warn instead of hard-stop.
+# 0.85 leaves ~15 % headroom for the model's reply.
+_CONTEXT_WARN_RATIO = 0.85
+
 
 class Cortex:
     """
@@ -77,10 +85,11 @@ class Cortex:
         )
         self._on_token = on_token   # optional direct callback for UI streaming
         self._active   = False
-        # Guard against overlapping deliberations.  Since _deliberate runs on
-        # the single-threaded asyncio event loop, a plain bool is race-safe
-        # here – no lock is needed.
-        self._deliberating = False
+        # Input queue: replaces the old _deliberating bool so that inputs
+        # submitted while deliberation is in progress are queued rather than
+        # silently dropped.  _consume_inputs() drains the queue one item at a
+        # time, ensuring deliberations are strictly serialised.
+        self._input_queue: asyncio.Queue[str] = asyncio.Queue()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -90,6 +99,10 @@ class Cortex:
         self._active = True
         self._thread.start()
         lattice.attach_loop(self._loop)
+        # Schedule the serialised input consumer on the cortex event loop.
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(self._consume_inputs())
+        )
         log.info("Cortex started (thread: %s)", self._thread.name)
 
     def stop(self) -> None:
@@ -113,40 +126,49 @@ class Cortex:
     def submit_input(self, text: str) -> None:
         """
         Submit user input for processing.
-        Schedules a deliberation pulse on the Cortex event loop.
+
+        Puts the text onto the input queue.  If a deliberation is already in
+        progress the message is held until it completes (no input is dropped).
+        When more than one message is already waiting, the user is notified via
+        the signal lattice so they know their message is queued.
         """
         if not text.strip():
             return
-        asyncio.run_coroutine_threadsafe(self._deliberate(text), self._loop)
+        queue_size = self._input_queue.qsize()
+        if queue_size > 0:
+            lattice.emit_kind(
+                SigKind.NOTIFICATION,
+                {"message": f"Message queued (position {queue_size + 1})."},
+                source="cortex",
+            )
+        # put_nowait is safe: the queue is unbounded and this is a fast O(1) op.
+        self._loop.call_soon_threadsafe(self._input_queue.put_nowait, text)
 
     # ------------------------------------------------------------------
     # Deliberation Pulse
     # ------------------------------------------------------------------
 
-    async def _deliberate(self, user_text: str) -> None:
-        """Core cognitive cycle: perceive → reason → act → integrate."""
-        # Prevent overlapping deliberations.  Because this coroutine runs on
-        # the Cortex's dedicated single-threaded asyncio loop, checking and
-        # setting a plain bool is safe without a lock.  If the model is already
-        # generating a response, the new input is dropped and the user is
-        # notified via the signal lattice.
-        if self._deliberating:
-            log.warning(
-                "Deliberation already in progress; input dropped: '%s'",
-                user_text[:60],
-            )
-            lattice.emit_kind(
-                SigKind.NOTIFICATION,
-                {"message": "Please wait for the current response to complete."},
-                source="cortex",
-            )
-            return
+    async def _consume_inputs(self) -> None:
+        """
+        Serialised input consumer – runs on the Cortex event loop.
 
-        self._deliberating = True
-        try:
-            await self._deliberate_inner(user_text)
-        finally:
-            self._deliberating = False
+        Waits for items from *_input_queue* and runs one deliberation at a
+        time.  Because this coroutine awaits ``_deliberate_inner`` before
+        calling ``get()`` again, deliberations are strictly sequential and
+        no input is ever dropped.  The loop exits when ``_active`` becomes
+        False and a short wait elapses with no new input.
+        """
+        while True:
+            try:
+                text = await asyncio.wait_for(self._input_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                if not self._active:
+                    break
+                continue
+            try:
+                await self._deliberate_inner(text)
+            except Exception as exc:
+                log.exception("Unhandled deliberation error: %s", exc)
 
     async def _deliberate_inner(self, user_text: str) -> None:
         """
@@ -192,6 +214,34 @@ class Cortex:
             if self._nexus.tool_calls_supported
             else None
         )
+
+        # ── 4b. Context-window overflow check ────────────────────────────
+        # Estimate the total prompt token count using a chars/token heuristic.
+        # If we are approaching the model's context limit, warn in the log
+        # and emit a NOTIFICATION so the user knows the context may be truncated.
+        context_limit: int = cfg.get("context_limit_tokens", 4096)
+        estimated_tokens = (
+            sum(len(m.get("content", "")) for m in messages)
+            + len(system_prompt)
+        ) // _CHARS_PER_TOKEN
+        if estimated_tokens > context_limit * _CONTEXT_WARN_RATIO:
+            log.warning(
+                "Estimated prompt size (%d tokens) exceeds %.0f%% of "
+                "context limit (%d).  Oldest fluid entries may be truncated "
+                "by the model.  Consider starting a new session.",
+                estimated_tokens, _CONTEXT_WARN_RATIO * 100, context_limit,
+            )
+            lattice.emit_kind(
+                SigKind.NOTIFICATION,
+                {
+                    "message": (
+                        f"Context is nearly full (~{estimated_tokens} tokens / "
+                        f"{context_limit} limit).  Older context may be lost. "
+                        "Consider starting a new chat session."
+                    )
+                },
+                source="cortex",
+            )
 
         max_iterations = cfg.get("react_max_iterations", 6)
         final_response = ""
@@ -288,7 +338,10 @@ class Cortex:
         # zero tokens and no exception was raised).  This is extremely rare
         # but we must not write an empty assistant turn to fluid memory.
         if not final_response:
-            final_response = "[No response generated]"
+            final_response = (
+                "Error: the model did not generate a response. "
+                "Please try again or rephrase your input."
+            )
             log.warning("ReAct: final_response is empty, substituting placeholder")
 
         # ── 6. Write final answer to fluid memory ────────────────────────

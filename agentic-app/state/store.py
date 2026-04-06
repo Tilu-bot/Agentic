@@ -48,8 +48,19 @@ CREATE TABLE IF NOT EXISTS bedrock (
     ts          REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS fluid (
+    entry_id    TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    tags        TEXT NOT NULL DEFAULT '[]',
+    ts          REAL NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_crystal_session ON crystal(session_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_bedrock_cat    ON bedrock(category, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_fluid_session  ON fluid(session_id, ts ASC);
 """
 
 
@@ -118,6 +129,9 @@ class Store:
         with self._lock:
             self._conn.execute(
                 "DELETE FROM crystal WHERE session_id=?", (session_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM fluid WHERE session_id=?", (session_id,)
             )
             self._conn.execute(
                 "DELETE FROM sessions WHERE id=?", (session_id,)
@@ -230,3 +244,62 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    # ------------------------------------------------------------------
+    # Fluid memory persistence (crash-safe working context)
+    # ------------------------------------------------------------------
+
+    def fluid_insert(
+        self,
+        entry_id: str,
+        session_id: str,
+        role: str,
+        text: str,
+        tags: list[str],
+        ts: float,
+    ) -> None:
+        """Persist a single FluidEntry row."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO fluid"
+                "(entry_id, session_id, role, text, tags, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (entry_id, session_id, role, text, json.dumps(tags), ts),
+            )
+
+    def fluid_restore(self, session_id: str) -> list[dict[str, Any]]:
+        """Return all persisted fluid entries for *session_id* in ts order."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT entry_id, role, text, tags, ts "
+                "FROM fluid WHERE session_id=? ORDER BY ts ASC",
+                (session_id,),
+            ).fetchall()
+        return [
+            {
+                "entry_id": r["entry_id"],
+                "role":     r["role"],
+                "text":     r["text"],
+                "tags":     json.loads(r["tags"]),
+                "ts":       r["ts"],
+            }
+            for r in rows
+        ]
+
+    def fluid_delete_entries(self, entry_ids: list[str]) -> None:
+        """Delete specific fluid rows by their entry_ids."""
+        if not entry_ids:
+            return
+        placeholders = ",".join("?" * len(entry_ids))
+        with self._lock:
+            self._conn.execute(
+                f"DELETE FROM fluid WHERE entry_id IN ({placeholders})",
+                entry_ids,
+            )
+
+    def fluid_clear(self, session_id: str) -> None:
+        """Delete all fluid rows for *session_id*."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM fluid WHERE session_id=?", (session_id,)
+            )
