@@ -56,6 +56,10 @@ _CHARS_PER_TOKEN = 4
 # 0.85 leaves ~15 % headroom for the model's reply.
 _CONTEXT_WARN_RATIO = 0.85
 
+# Base delay (seconds) for the exponential back-off between skill retries.
+# Actual delay = _RETRY_BASE_DELAY_S × attempt_number (1-indexed).
+_RETRY_BASE_DELAY_S = 0.5
+
 
 class Cortex:
     """
@@ -89,7 +93,10 @@ class Cortex:
         # submitted while deliberation is in progress are queued rather than
         # silently dropped.  _consume_inputs() drains the queue one item at a
         # time, ensuring deliberations are strictly serialised.
-        self._input_queue: asyncio.Queue[str] = asyncio.Queue()
+        # The queue accepts ``str | None``; a ``None`` sentinel is pushed by
+        # ``stop()`` to wake the consumer and trigger a clean exit without
+        # relying on a 1-second polling timeout.
+        self._input_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -107,6 +114,9 @@ class Cortex:
 
     def stop(self) -> None:
         self._active = False
+        # Push a None sentinel to wake _consume_inputs immediately so it can
+        # exit cleanly without waiting up to 1 second for a timeout.
+        self._loop.call_soon_threadsafe(self._input_queue.put_nowait, None)
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
         log.info("Cortex stopped")
@@ -155,18 +165,17 @@ class Cortex:
         Waits for items from *_input_queue* and runs one deliberation at a
         time.  Because this coroutine awaits ``_deliberate_inner`` before
         calling ``get()`` again, deliberations are strictly sequential and
-        no input is ever dropped.  The loop exits when ``_active`` becomes
-        False and a short wait elapses with no new input.
+        no input is ever dropped.  The loop exits when a ``None`` sentinel
+        is received (pushed by ``stop()``).
         """
         while True:
+            item = await self._input_queue.get()
+            if item is None:
+                # Sentinel: graceful shutdown requested.
+                log.debug("Cortex input consumer received shutdown sentinel")
+                break
             try:
-                text = await asyncio.wait_for(self._input_queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                if not self._active:
-                    break
-                continue
-            try:
-                await self._deliberate_inner(text)
+                await self._deliberate_inner(item)
             except Exception as exc:
                 log.exception("Unhandled deliberation error: %s", exc)
 
@@ -215,29 +224,41 @@ class Cortex:
             else None
         )
 
-        # ── 4b. Context-window overflow check ────────────────────────────
+        # ── 4b. Context-window overflow enforcement ───────────────────────
         # Estimate the total prompt token count using a chars/token heuristic.
-        # If we are approaching the model's context limit, warn in the log
-        # and emit a NOTIFICATION so the user knows the context may be truncated.
+        # When approaching the model's context limit, trim the oldest messages
+        # to fit within the limit and notify the user.  A warning notification
+        # is still emitted so the user knows context was shortened.
         context_limit: int = cfg.get("context_limit_tokens", 4096)
-        estimated_tokens = (
-            sum(len(m.get("content", "")) for m in messages)
-            + len(system_prompt)
-        ) // _CHARS_PER_TOKEN
+        estimated_tokens = self._estimate_tokens(messages, system_prompt)
         if estimated_tokens > context_limit * _CONTEXT_WARN_RATIO:
+            before_tokens = estimated_tokens
+            before_count = len(messages)
+            estimated_tokens = self._trim_messages_to_context(
+                messages, system_prompt, context_limit
+            )
+            trimmed = before_count - len(messages)
             log.warning(
-                "Estimated prompt size (%d tokens) exceeds %.0f%% of "
-                "context limit (%d).  Oldest fluid entries may be truncated "
-                "by the model.  Consider starting a new session.",
-                estimated_tokens, _CONTEXT_WARN_RATIO * 100, context_limit,
+                "Prompt size (%d tokens) exceeded %.0f%% of context limit (%d). "
+                "Trimmed %d oldest message(s) → ~%d tokens remain.",
+                before_tokens,
+                _CONTEXT_WARN_RATIO * 100,
+                context_limit,
+                trimmed,
+                estimated_tokens,
             )
             lattice.emit_kind(
                 SigKind.NOTIFICATION,
                 {
                     "message": (
-                        f"Context is nearly full (~{estimated_tokens} tokens / "
-                        f"{context_limit} limit).  Older context may be lost. "
-                        "Consider starting a new chat session."
+                        f"Context window was nearly full (~{estimated_tokens} tokens / "
+                        f"{context_limit} limit). "
+                        + (
+                            f"{trimmed} oldest message(s) were removed to fit. "
+                            if trimmed
+                            else ""
+                        )
+                        + "Consider starting a new chat session if important context was lost."
                     )
                 },
                 source="cortex",
@@ -359,6 +380,42 @@ class Cortex:
         )
 
     # ------------------------------------------------------------------
+    # Context-window helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _estimate_tokens(messages: list[dict], system_prompt: str) -> int:
+        """Estimate the prompt token count via the chars-per-token heuristic."""
+        return (
+            sum(len(m.get("content", "")) for m in messages) + len(system_prompt)
+        ) // _CHARS_PER_TOKEN
+
+    @staticmethod
+    def _trim_messages_to_context(
+        messages: list[dict],
+        system_prompt: str,
+        context_limit: int,
+    ) -> int:
+        """
+        Trim *messages* in-place from the oldest end until the estimated
+        token count is within *context_limit*.
+
+        The current user turn (last element) is always preserved so that the
+        model always sees the latest request.  Returns the final estimated
+        token count after trimming.
+        """
+        while len(messages) > 1:
+            tokens = (
+                sum(len(m.get("content", "")) for m in messages) + len(system_prompt)
+            ) // _CHARS_PER_TOKEN
+            if tokens <= context_limit:
+                break
+            messages.pop(0)
+        return (
+            sum(len(m.get("content", "")) for m in messages) + len(system_prompt)
+        ) // _CHARS_PER_TOKEN
+
+    # ------------------------------------------------------------------
     # Skill execution primitive
     # ------------------------------------------------------------------
 
@@ -408,10 +465,23 @@ class Cortex:
 
     def _make_skill_fn(self, inv: SkillInvocation):
         async def _fn(fiber: TaskFiber):
+            retry_budget: int = cfg.get("skill_retry_budget", 1)
             fiber.set_progress(0.1)
-            result = await self._registry.invoke(inv.skill_name, **inv.args)
-            fiber.set_progress(1.0)
-            if result.success:
-                return result.output
-            raise RuntimeError(result.error)
+            last_result = None
+            for attempt in range(retry_budget + 1):
+                last_result = await self._registry.invoke(inv.skill_name, **inv.args)
+                if last_result.success:
+                    fiber.set_progress(1.0)
+                    return last_result.output
+                if attempt < retry_budget:
+                    delay = _RETRY_BASE_DELAY_S * (attempt + 1)
+                    log.warning(
+                        "Skill '%s' failed (attempt %d/%d): %s — retrying in %.1fs…",
+                        inv.skill_name, attempt + 1, retry_budget + 1,
+                        last_result.error, delay,
+                    )
+                    await asyncio.sleep(delay)
+            raise RuntimeError(
+                last_result.error if last_result else "skill returned no result"
+            )
         return _fn

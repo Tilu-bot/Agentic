@@ -32,6 +32,7 @@ _CONFIG_SCHEMA: dict[str, dict] = {
     "log_level":            {"type": str, "choices": {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}},
     "react_max_iterations": {"type": int, "min": 1,  "max": 20},
     "context_limit_tokens": {"type": int, "min": 512, "max": 131072},
+    "skill_retry_budget":   {"type": int, "min": 0,  "max": 3},
 }
 
 
@@ -105,9 +106,14 @@ _DEFAULT: dict[str, Any] = {
     # multi-step tasks while preventing runaway loops.
     "react_max_iterations": 6,
     # Approximate token limit for the assembled prompt (system + messages).
-    # Used for the context-overflow warning; does not truncate automatically.
-    # Most small open-source models support 4096–8192 tokens.
+    # When this limit is approached (85 % threshold) the oldest messages are
+    # automatically trimmed from the conversation history to keep the prompt
+    # within bounds.  Most small open-source models support 4096–8192 tokens.
     "context_limit_tokens": 4096,
+    # Maximum number of retry attempts for a single skill invocation when it
+    # returns an error.  0 means no retries (fail immediately).  Each retry
+    # uses an exponential back-off delay (0.5 s × attempt).
+    "skill_retry_budget": 1,
 }
 
 
