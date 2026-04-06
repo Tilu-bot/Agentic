@@ -194,6 +194,10 @@ class ChatView(tk.Frame):
     def _update_token_counter(self) -> None:
         self._token_lbl.config(text=f"{self._token_count} tokens")
 
+    def set_status(self, text: str, busy: bool = False) -> None:
+        """Public proxy for status updates called from the app layer."""
+        self._set_status(text, busy=busy)
+
     def _set_status(self, text: str, busy: bool = False) -> None:
         colour = self._pal.warn if busy else self._pal.fg_muted
         self._status_lbl.config(text=text, fg=colour)

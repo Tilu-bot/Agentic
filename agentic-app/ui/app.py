@@ -171,11 +171,13 @@ class AgenticApp(tk.Tk):
         from skills.web_reader  import register_all as reg_web
         from skills.code_runner import register_all as reg_code
         from skills.memory_ops  import register_all as reg_mem
+        from skills.doc_reader  import register_all as reg_docs
 
         reg_fs()
         reg_web()
         reg_code()
         reg_mem(self._session_mgr.memory)
+        reg_docs()
 
         from core.skill_registry import skill_registry
 
@@ -188,8 +190,11 @@ class AgenticApp(tk.Tk):
         self._cortex.start()
 
         # Subscribe to deliberation end (to signal streaming complete)
-        lattice.on(SigKind.DELIBERATION_END, self._on_deliberation_end)
-        lattice.on(SigKind.MODEL_ERROR,       self._on_model_error)
+        lattice.on(SigKind.DELIBERATION_START, self._on_deliberation_start)
+        lattice.on(SigKind.DELIBERATION_END,   self._on_deliberation_end)
+        lattice.on(SigKind.REACT_ITERATION,    self._on_react_iteration)
+        lattice.on(SigKind.MODEL_ERROR,        self._on_model_error)
+        lattice.on(SigKind.MODEL_LOADING,      self._on_model_loading)
 
         # Build views
         self._build_views()
@@ -259,15 +264,55 @@ class AgenticApp(tk.Tk):
         if hasattr(self, "_chat_view"):
             self._chat_view.push_token(token)
 
+    def _on_deliberation_start(self, sig: Any) -> None:
+        """Update status bar as soon as deliberation begins."""
+        if hasattr(self, "_chat_view"):
+            self._chat_view.set_status("Thinking…", busy=True)
+
     def _on_deliberation_end(self, sig: Any) -> None:
         if hasattr(self, "_chat_view"):
             self._chat_view.finish_streaming()
+
+    def _on_react_iteration(self, sig: Any) -> None:
+        """Inform the user that the model is running tools and re-reasoning."""
+        iteration   = sig.payload.get("iteration", "?")
+        skills_run  = sig.payload.get("skills_run", [])
+        skill_names = ", ".join(skills_run) or "none"
+        if hasattr(self, "_chat_view"):
+            self._chat_view.set_status(
+                f"Reasoning… (iteration {iteration}, tools: {skill_names})", busy=True
+            )
 
     def _on_model_error(self, sig: Any) -> None:
         error = sig.payload.get("error", "Unknown error")
         if hasattr(self, "_chat_view"):
             self._chat_view.push_token(f"\n[Model error: {error}]")
             self._chat_view.finish_streaming()
+
+    def _on_model_loading(self, sig: Any) -> None:
+        """Update the status bar with model loading progress."""
+        stage    = sig.payload.get("stage", "")
+        model_id = sig.payload.get("model_id", "model")
+        # Show only the short name (last component of the HF repo path).
+        short = model_id.split("/")[-1] if "/" in model_id else model_id
+        if stage == "start":
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(f"Loading {short}…", busy=True)
+        elif stage == "tokenizer":
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(f"Loading tokenizer: {short}…", busy=True)
+        elif stage == "weights":
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(f"Loading weights: {short}…", busy=True)
+        elif stage == "done":
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status("Model ready", busy=False)
+                self._chat_view.append_info(f"✓ Model loaded: {model_id}")
+        elif stage == "error":
+            error = sig.payload.get("error", "unknown error")
+            log.error("Model load failed: %s – %s", model_id, error)
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(f"Model load failed: {error[:60]}", busy=False)
 
     # ------------------------------------------------------------------
     # Session management

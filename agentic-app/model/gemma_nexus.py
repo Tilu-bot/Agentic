@@ -109,6 +109,33 @@ def get_assistant_role(model_id: str) -> str:
     return "model" if "gemma" in model_id.lower() else "assistant"
 
 
+def _supports_tool_calls(tokenizer: Any) -> bool:
+    """
+    Probe whether the tokenizer's chat template supports native tool/function
+    calling (Llama 3.1+, Qwen 2.5, Phi-4, Mistral-Nemo, …).
+
+    Renders a minimal one-tool, one-user-message conversation through the
+    template and checks that it succeeds without raising.  When the template
+    does not know about the ``tools`` parameter it raises a Jinja2 error.
+
+    This check runs exactly once at load time, so overhead is negligible.
+    """
+    try:
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "probe",
+                "description": "probe",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        probe_msgs = [{"role": "user", "content": "hi"}]
+        tokenizer.apply_chat_template(probe_msgs, tools=[tool], tokenize=False)
+        return True
+    except Exception:
+        return False
+
+
 def _supports_system_role(tokenizer: Any) -> bool:
     """
     Probe the tokenizer's chat template for native 'system' role support.
@@ -170,6 +197,11 @@ class ModelNexus:
         # Set to True at load time when the tokenizer supports a native "system" role.
         # When False, the system prompt is embedded as a leading user/assistant exchange.
         self._system_role_supported: bool = False
+        # Set to True at load time when the tokenizer supports native tool/function
+        # calling via the apply_chat_template(tools=...) parameter.  When True,
+        # the Cortex passes the tool schema directly to the model instead of
+        # relying solely on the text-based @@SKILL:...@@ prompt markers.
+        self._tool_calls_supported: bool = False
 
     # ------------------------------------------------------------------
     # Lazy model loading
@@ -195,16 +227,31 @@ class ModelNexus:
             "Loading model: %s (device=%s, 4bit=%s)",
             model_id, device_pref, quantize_4bit,
         )
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {"stage": "start", "model_id": model_id},
+            source="model_nexus",
+        )
 
         try:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError as exc:
+            lattice.emit_kind(
+                SigKind.MODEL_LOADING,
+                {"stage": "error", "model_id": model_id, "error": str(exc)},
+                source="model_nexus",
+            )
             raise RuntimeError(
                 "transformers and torch are required.\n"
                 "Run: pip install transformers torch accelerate"
             ) from exc
 
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {"stage": "tokenizer", "model_id": model_id},
+            source="model_nexus",
+        )
         tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token)
 
         # Probe the tokenizer once to determine if a native system role is
@@ -213,6 +260,10 @@ class ModelNexus:
         # and saves significant context tokens on every request.
         system_role_ok = _supports_system_role(tokenizer)
         log.info("Model %s native system role: %s", model_id, system_role_ok)
+
+        # Probe for native tool/function calling support (Llama 3.1+, Qwen 2.5, …)
+        tool_calls_ok = _supports_tool_calls(tokenizer)
+        log.info("Model %s native tool calling: %s", model_id, tool_calls_ok)
 
         load_kw: dict = {
             "token": hf_token,
@@ -267,7 +318,20 @@ class ModelNexus:
                 else:
                     load_kw["torch_dtype"] = torch.float16
 
-        model = AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {"stage": "weights", "model_id": model_id},
+            source="model_nexus",
+        )
+        try:
+            model = AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
+        except Exception as exc:
+            lattice.emit_kind(
+                SigKind.MODEL_LOADING,
+                {"stage": "error", "model_id": model_id, "error": str(exc)},
+                source="model_nexus",
+            )
+            raise
         model.eval()
 
         # Swap atomically so concurrent reads are never partially-initialised
@@ -275,7 +339,13 @@ class ModelNexus:
         self._model     = model
         self._model_id  = model_id
         self._system_role_supported = system_role_ok
+        self._tool_calls_supported  = tool_calls_ok
         log.info("Model ready: %s", model_id)
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {"stage": "done", "model_id": model_id},
+            source="model_nexus",
+        )
 
     # ------------------------------------------------------------------
     # Availability
@@ -283,6 +353,30 @@ class ModelNexus:
 
     def is_loaded(self) -> bool:
         return self._model is not None
+
+    @property
+    def tool_calls_supported(self) -> bool:
+        """True when the loaded model's tokenizer supports native tool calling."""
+        return self._tool_calls_supported
+
+    def count_tokens(self, text: str) -> int:
+        """
+        Return the number of tokens in *text* using the loaded tokenizer.
+
+        When the model has not been loaded yet, falls back to the
+        ``chars / 4`` heuristic (English-prose average for the GPT/LLaMA
+        family).  The heuristic is used only for the first pre-load
+        context-window check; all subsequent calls during an active
+        deliberation use the real tokenizer.
+
+        Note: the heuristic can be off by 2× for code-heavy input or
+        non-English text where per-token character counts differ significantly
+        from the 4-chars average.  Once the model is loaded the actual
+        tokenizer is always used, so this inaccuracy is transient.
+        """
+        if self._tokenizer is not None:
+            return len(self._tokenizer.encode(text))
+        return max(1, len(text) // 4)
 
     def list_models(self) -> list[str]:
         return list(KNOWN_MODELS)
@@ -303,6 +397,7 @@ class ModelNexus:
         system: str = "",
         temperature: float = 0.7,
         max_tokens: int = 2048,
+        tools_schema: list[dict] | None = None,
     ) -> AsyncIterator[str]:
         """
         Async generator yielding generated token strings one at a time.
@@ -312,10 +407,15 @@ class ModelNexus:
         generation thread to the async caller via an asyncio.Queue.
 
         Args:
-            messages:    List of {"role": "...", "content": "..."} dicts.
-            system:      System prompt text (prepended to conversation).
-            temperature: Sampling temperature (0 = greedy decode).
-            max_tokens:  Maximum new tokens to generate.
+            messages:     List of {"role": "...", "content": "..."} dicts.
+            system:       System prompt text (prepended to conversation).
+            temperature:  Sampling temperature (0 = greedy decode).
+            max_tokens:   Maximum new tokens to generate.
+            tools_schema: Optional OpenAI-format tool schema list.  When the
+                          loaded model's tokenizer supports native tool calling
+                          (detected at load time) and this list is non-empty,
+                          it is passed as ``tools=`` to ``apply_chat_template``
+                          so the model produces structured tool-call output.
         """
         # Force a reload if the user changed the model in Settings.
         if cfg.get("model_id", "google/gemma-3-1b-it") != self._model_id:
@@ -357,6 +457,9 @@ class ModelNexus:
             full_messages,
             add_generation_prompt=True,
             return_tensors="pt",
+            **({"tools": tools_schema}
+               if tools_schema and self._tool_calls_supported
+               else {}),
         )
 
         device     = next(model.parameters()).device
@@ -469,10 +572,13 @@ class ModelNexus:
         system: str = "",
         temperature: float = 0.7,
         max_tokens: int = 2048,
+        tools_schema: list[dict] | None = None,
     ) -> NexusResponse:
         """Collect the full response as a single NexusResponse."""
         parts: list[str] = []
-        async for token in self.stream(messages, system, temperature, max_tokens):
+        async for token in self.stream(
+            messages, system, temperature, max_tokens, tools_schema
+        ):
             parts.append(token)
         return NexusResponse(text="".join(parts), model=self._model_id)
 

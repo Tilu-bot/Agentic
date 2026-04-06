@@ -134,6 +134,7 @@ class RunPythonSkill(SkillBase):
                 sys.executable,
                 "-c",
                 code,
+                stdin=asyncio.subprocess.DEVNULL,   # no interactive reads
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

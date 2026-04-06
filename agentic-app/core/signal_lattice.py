@@ -44,7 +44,9 @@ class SigKind(Enum):
     # Cortex lifecycle
     DELIBERATION_START = auto()
     DELIBERATION_END   = auto()
+    REACT_ITERATION    = auto()   # emitted after each ReAct tool-use round-trip
     # Model interaction
+    MODEL_LOADING      = auto()   # emitted during model weight loading (start/tokenizer/weights/done/error)
     MODEL_STREAM_TOKEN = auto()
     MODEL_STREAM_DONE  = auto()
     MODEL_ERROR        = auto()

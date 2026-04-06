@@ -75,6 +75,16 @@ Wait for skill results before concluding your answer.
 _BLOCK_OPEN  = "<skill_call>"
 _BLOCK_CLOSE = "</skill_call>"
 
+# Native tool-call formats emitted by models when tools= is passed to apply_chat_template.
+# Qwen 2.5 / Llama 3.1 use XML-style <tool_call> tags; Mistral uses a JSON array prefix.
+_TOOL_CALL_OPEN  = "<tool_call>"
+_TOOL_CALL_CLOSE = "</tool_call>"
+_MISTRAL_TOOL_CALLS_PREFIX = "[TOOL_CALLS]"
+
+# Maximum characters to include from a skill's argument dict in the observation
+# message.  Keeps the context window reasonable when args contain large payloads.
+_ARG_SUMMARY_MAX_CHARS = 120
+
 
 @dataclass
 class SkillInvocation:
@@ -242,13 +252,114 @@ class PromptWeaver:
 
             j = close_pos + len(_BLOCK_CLOSE)
 
+        # ── Format C: <tool_call>{"name": "...", "arguments": {...}}</tool_call> ──
+        # Emitted by Qwen 2.5, Llama 3.1+, and other models when native tool
+        # calling is enabled via apply_chat_template(tools=...).  Uses "arguments"
+        # as the key (OpenAI convention).
+        k = 0
+        while k < len(text):
+            open_pos = text.find(_TOOL_CALL_OPEN, k)
+            if open_pos == -1:
+                break
+            content_start = open_pos + len(_TOOL_CALL_OPEN)
+            close_pos = text.find(_TOOL_CALL_CLOSE, content_start)
+            if close_pos == -1:
+                break
+
+            raw_content = text[content_start:close_pos].strip()
+            raw = text[open_pos : close_pos + len(_TOOL_CALL_CLOSE)]
+
+            try:
+                obj = json.loads(raw_content)
+                skill_name = obj.get("name", "")
+                args = obj.get("arguments", obj.get("args", {}))
+                if skill_name and isinstance(args, dict):
+                    results.append(
+                        SkillInvocation(skill_name=skill_name, args=args, raw=raw)
+                    )
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+            k = close_pos + len(_TOOL_CALL_CLOSE)
+
+        # ── Format D: [TOOL_CALLS] [{"name": "...", "arguments": {...}}, ...] ──
+        # Emitted by Mistral-Instruct models when tool calling is enabled.
+        # The prefix is followed by a JSON array of tool-call objects.
+        tc_pos = text.find(_MISTRAL_TOOL_CALLS_PREFIX)
+        if tc_pos != -1:
+            array_start = text.find("[", tc_pos + len(_MISTRAL_TOOL_CALLS_PREFIX))
+            if array_start != -1:
+                # Walk to find the matching closing bracket
+                depth = 0
+                in_string = False
+                escape_next = False
+                m = array_start
+                while m < len(text):
+                    ch = text[m]
+                    if escape_next:
+                        escape_next = False
+                    elif ch == "\\" and in_string:
+                        escape_next = True
+                    elif ch == '"':
+                        in_string = not in_string
+                    elif not in_string:
+                        if ch == "[":
+                            depth += 1
+                        elif ch == "]":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                    m += 1
+                raw_array = text[array_start : m + 1]
+                try:
+                    calls = json.loads(raw_array)
+                    if isinstance(calls, list):
+                        for call in calls:
+                            skill_name = call.get("name", "")
+                            args = call.get("arguments", call.get("args", {}))
+                            if skill_name and isinstance(args, dict):
+                                results.append(
+                                    SkillInvocation(
+                                        skill_name=skill_name,
+                                        args=args,
+                                        raw=raw_array,
+                                    )
+                                )
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+
         return results
 
     @staticmethod
-    def inject_skill_result(text: str, invocation: SkillInvocation, result: str) -> str:
-        """Replace a skill marker with its result in the response text."""
-        replacement = f"[Skill: {invocation.skill_name} → {result}]"
-        return text.replace(invocation.raw, replacement, 1)
+    def format_observations(
+        results: list[tuple["SkillInvocation", str, bool]],
+    ) -> str:
+        """
+        Build a user-turn observation message from a batch of skill results.
+
+        In the ReAct loop the model's tool-call turn is followed by this
+        observation message so the model can reason over the actual skill
+        outputs before producing its final answer.  The format is explicit
+        and structured so the model reliably distinguishes successes from
+        failures.
+        """
+        parts: list[str] = [
+            "== Tool Results ==",
+            "The following skills were executed.  Use these results to "
+            "complete your response or decide whether further tool calls are "
+            "needed.",
+        ]
+        for inv, result, success in results:
+            status = "SUCCESS" if success else "ERROR"
+            arg_summary = json.dumps(inv.args, ensure_ascii=False)[:_ARG_SUMMARY_MAX_CHARS]
+            parts.append(
+                f"\n[{status}] {inv.skill_name}({arg_summary}):\n{result}"
+            )
+        parts.append(
+            "\nIf all necessary information has been gathered, provide your "
+            "final answer now.  If you still need to call more tools, do so."
+        )
+        return "\n".join(parts)
 
 
 def _map_role(role: str) -> str | None:

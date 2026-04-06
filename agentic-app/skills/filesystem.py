@@ -3,6 +3,12 @@ Agentic - Filesystem Skill
 ===========================
 Provides safe read/write/list operations on the local filesystem.
 Operations are restricted to user-accessible paths (no root/system paths).
+
+Path safety:
+  _safe_path() resolves symlinks and checks the canonical path against a
+  blocklist of system directories.  The check walks the resolved path's
+  parent chain using Path.parents rather than a string prefix match to
+  prevent bypass via paths like /etc/../home/... after resolution.
 """
 from __future__ import annotations
 
@@ -15,14 +21,40 @@ from utils.logger import build_logger
 
 log = build_logger("agentic.skill.filesystem")
 
-_BLOCKED = {"/etc", "/bin", "/sbin", "/usr/bin", "/sys", "/proc"}
+# Directories that must never be accessed.  All entries must be
+# canonical absolute paths (no trailing slash, no symlinks).
+_BLOCKED_DIRS: frozenset[Path] = frozenset({
+    Path("/etc"),
+    Path("/bin"),
+    Path("/sbin"),
+    Path("/usr/bin"),
+    Path("/usr/sbin"),
+    Path("/sys"),
+    Path("/proc"),
+    Path("/dev"),
+    Path("/boot"),
+    Path("/root"),
+})
 
 
 def _safe_path(raw: str) -> Path:
+    """
+    Resolve *raw* to a canonical absolute path and raise PermissionError if
+    any component falls inside a blocked system directory.
+
+    Uses ``Path.parents`` (returns every ancestor) rather than a string
+    startswith() check so that symlinks and ``..`` segments cannot be used
+    to smuggle a blocked prefix past the check after resolution.
+    """
     p = Path(raw).expanduser().resolve()
-    for blocked in _BLOCKED:
-        if str(p).startswith(blocked):
-            raise PermissionError(f"Access to {p} is not allowed")
+    # Materialise all ancestors once, including the path itself, to avoid
+    # redundant parent-chain reconstruction on each iteration.
+    ancestors = [p, *p.parents]
+    for ancestor in ancestors:
+        if ancestor in _BLOCKED_DIRS:
+            raise PermissionError(
+                f"Access to '{p}' is not allowed (falls under blocked directory '{ancestor}')"
+            )
     return p
 
 
