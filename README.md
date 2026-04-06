@@ -101,7 +101,44 @@ agentic-app/
 
 ## Building a Distributable
 
+### Windows — Single Installer `.exe` (recommended)
+
+Produces `installer/Agentic-Setup.exe` — a wizard-based installer that handles
+installation directory, Start Menu entry, Desktop shortcut, and an uninstaller,
+just like any standard Windows application.
+
+**Prerequisites:**
+1. Python 3.11+ on PATH
+2. [Inno Setup 6](https://jrsoftware.org/isdl.php) (free, installs to default path)
+
+**Build:**
+```bat
+cd agentic-app
+build_installer.bat
+```
+
+The script automatically:
+1. Installs Python dependencies
+2. Generates `assets/icon.ico`
+3. Bundles the app with PyInstaller → `dist/Agentic/`
+4. Compiles the Inno Setup script → `installer/Agentic-Setup.exe`
+
+Distribute **`installer/Agentic-Setup.exe`** to users. Double-clicking it
+starts the installation wizard.
+
+### Portable Bundle (all platforms)
+
+Produces `dist/Agentic/` — a folder containing `Agentic.exe` and its
+dependencies. No installation required; copy the folder anywhere and run
+`Agentic.exe`.
+
 ```bash
 cd agentic-app
 pyinstaller agentic.spec
 ```
+
+### macOS `.app` Bundle
+
+Running the same `pyinstaller agentic.spec` command on macOS additionally
+produces `dist/Agentic.app` which can be dragged to `/Applications`.
+
