@@ -171,11 +171,13 @@ class AgenticApp(tk.Tk):
         from skills.web_reader  import register_all as reg_web
         from skills.code_runner import register_all as reg_code
         from skills.memory_ops  import register_all as reg_mem
+        from skills.doc_reader  import register_all as reg_docs
 
         reg_fs()
         reg_web()
         reg_code()
         reg_mem(self._session_mgr.memory)
+        reg_docs()
 
         from core.skill_registry import skill_registry
 

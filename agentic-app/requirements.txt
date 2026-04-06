@@ -20,5 +20,11 @@ huggingface_hub>=0.27.0
 # Async HTTP client for the web-fetch skill
 httpx>=0.28.0
 
+# Document reader skills (PDF, Excel, Word, PowerPoint)
+pypdf>=5.1.0
+openpyxl>=3.1.5
+python-docx>=1.1.2
+python-pptx>=1.0.2
+
 # PyInstaller for the standalone desktop app bundle
 pyinstaller>=6.11.0
