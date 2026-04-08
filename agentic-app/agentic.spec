@@ -69,23 +69,15 @@ a = Analysis(
         "tkinter",
         "tkinter.ttk",
         "tkinter.scrolledtext",
-        # HuggingFace / PyTorch
+        # HuggingFace / PyTorch are imported lazily in model.gemma_nexus.
+        # Keep only the minimal dynamic-import surface for runtime.
         "transformers",
-        "transformers.models.gemma",
-        "transformers.models.gemma2",
-        "transformers.generation",
         "transformers.generation.streamers",
         "torch",
         "accelerate",
         "huggingface_hub",
         # httpx (web-fetch skill)
         "httpx",
-        "httpcore",
-        "anyio",
-        "certifi",
-        "h11",
-        "idna",
-        "sniffio",
         # Document reader skill (PDF, Excel, Word, PowerPoint)
         "pypdf",
         "openpyxl",
@@ -96,11 +88,18 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Exclude heavy unused packages
+        # Exclude heavy unused packages and optional ML backends that cause
+        # PyInstaller hook explosions in globally polluted Python installs.
         "matplotlib", "pandas", "scipy",
         # PIL/Pillow: only needed by build-time assets/generate_icon_ico.py,
         # not by the running app — keep it out of the bundle.
-        "PIL", "cv2", "tensorflow",
+        "PIL", "cv2",
+        "tensorflow", "tensorflow_intel", "keras",
+        "jax", "flax",
+        "datasets", "evaluate", "pyarrow",
+        "sklearn", "scikit_learn",
+        "boto3", "botocore", "s3transfer",
+        "sqlalchemy", "nltk", "Crypto", "pytest",
         "IPython", "notebook", "jupyter",
     ],
     win_no_prefer_redirects=False,

@@ -13,6 +13,8 @@ Window title: Agentic
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from typing import Any
@@ -25,7 +27,6 @@ from ui.chat_view import ChatView
 from ui.components import AgFrame, AgLabel, NavItem
 from ui.memory_view import MemoryView
 from ui.settings_view import SettingsView
-from ui.task_panel import TaskPanel
 from ui.theme import FONTS, M, Palette, palette
 from utils.config import cfg
 from utils.logger import build_logger
@@ -37,10 +38,10 @@ class AgenticApp(tk.Tk):
     """
     Root window of the Agentic desktop application.
     Layout:
-      ┌──────────┬──────────────────────┬─────────────┐
-      │ Sidebar  │   Main panel         │  Task panel │
-      │ (nav)    │   (chat/memory/etc)  │  (fibers)   │
-      └──────────┴──────────────────────┴─────────────┘
+            ┌──────────┬──────────────────────────────────┐
+            │ Sidebar  │          Main panel              │
+            │ (nav)    │    (chat / memory / settings)    │
+            └──────────┴──────────────────────────────────┘
     """
 
     def __init__(self) -> None:
@@ -52,6 +53,15 @@ class AgenticApp(tk.Tk):
         self._cortex: Cortex | None = None
         self._session_mgr: SessionManager | None = None
         self._store: Store | None = None
+        self._tools_count: int = 0
+        self._load_stage: str = ""
+        self._load_model_short: str = "model"
+        self._load_started_at: float = 0.0
+        self._load_tick_job: str | None = None
+        self._load_long_hint_shown: bool = False
+        self._load_last_stage_announcement: str = ""
+        self._load_last_download_pct: int = -1
+        self._load_download_pct: int = -1
 
         self._configure_window()
         self._build_layout()
@@ -86,73 +96,70 @@ class AgenticApp(tk.Tk):
     def _build_layout(self) -> None:
         pal = self._pal
 
-        # Root grid: sidebar | main | task panel
+        # Root grid: sidebar | main
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, minsize=M.sidebar_w, weight=0)
         self.grid_columnconfigure(1, weight=1)
-        self.grid_columnconfigure(2, minsize=260, weight=0)
 
         # ── Sidebar ──────────────────────────────────────────────────
-        self._sidebar = tk.Frame(self, bg=pal.bg_deep)
+        self._sidebar = tk.Frame(self, bg=pal.bg_deep, width=M.sidebar_w)
         self._sidebar.grid(row=0, column=0, sticky="nsew")
+        self._sidebar.grid_propagate(False)
 
-        # Branding
-        brand = tk.Frame(self._sidebar, bg=pal.bg_deep, pady=M.padding_lg)
-        brand.pack(fill="x")
+        # Branding section
+        brand = tk.Frame(self._sidebar, bg=pal.bg_deep)
+        brand.pack(fill="x", padx=M.padding_lg, pady=M.padding_lg)
+        
         AgLabel(
-            brand, pal, text="⬡ Agentic",
+            brand, pal, text="Agentic",
             bold=True, size=FONTS.size_xl,
             bg=pal.bg_deep,
-        ).pack(padx=M.padding_md)
+        ).pack(pady=(0, M.padding_xs))
+        
         AgLabel(
             brand, pal,
-            text="Reactive Cortex · Multi-Model",
+            text="AI Agent Workspace",
             muted=True, size=FONTS.size_xs,
             bg=pal.bg_deep,
         ).pack()
-        div = tk.Frame(self._sidebar, bg=pal.border, height=1)
-        div.pack(fill="x", pady=(M.padding_sm, M.padding_md))
+        
+        div = tk.Frame(self._sidebar, bg=pal.border_dim, height=1)
+        div.pack(fill="x", pady=(M.padding_lg, M.padding_md))
 
         # Navigation items
         nav_definitions = [
-            ("chat",     "💬", "Chat"),
-            ("memory",   "🧠", "Memory"),
-            ("settings", "⚙", "Settings"),
+            ("chat",     "💬", "Chat", "chat"),
+            ("memory",   "🧠", "Memory", "memory"),
+            ("settings", "⚙", "Settings", "settings"),
         ]
-        for nav_id, icon, label in nav_definitions:
+        for nav_id, icon, label, icon_name in nav_definitions:
             item = NavItem(
                 self._sidebar, pal,
-                label=label, icon=icon,
+                label=label,
+                icon=icon,
+                icon_name=icon_name,
                 on_click=lambda nid=nav_id: self._show_view(nid),
             )
-            item.pack(fill="x", padx=M.padding_xs)
+            item.pack(fill="x", padx=M.padding_sm, pady=(0, M.padding_xs))
             self._nav_items.append(item)
             # Store reference by nav_id
             item._nav_id = nav_id  # type: ignore[attr-defined]
 
-        # Session list (bottom of sidebar)
-        div2 = tk.Frame(self._sidebar, bg=pal.border, height=1)
-        div2.pack(fill="x", side="bottom", pady=M.padding_sm)
+        # Version info at bottom
+        div2 = tk.Frame(self._sidebar, bg=pal.border_dim, height=1)
+        div2.pack(fill="x", side="bottom", pady=(M.padding_lg, M.padding_sm))
         AgLabel(
             self._sidebar, pal,
-            text="v1.0  •  Multi-Model · HuggingFace",
+            text="Agentic v1.0",
             muted=True, size=FONTS.size_xs,
             bg=pal.bg_deep,
-        ).pack(side="bottom", pady=M.padding_xs)
+        ).pack(side="bottom", pady=M.padding_sm, padx=M.padding_md)
 
         # ── Main panel container ──────────────────────────────────────
         self._main_frame = AgFrame(self, pal)
         self._main_frame.grid(row=0, column=1, sticky="nsew")
         self._main_frame.grid_rowconfigure(0, weight=1)
         self._main_frame.grid_columnconfigure(0, weight=1)
-
-        # ── Task panel ───────────────────────────────────────────────
-        task_frame = tk.Frame(self, bg=pal.bg_base, bd=0)
-        task_frame.grid(row=0, column=2, sticky="nsew")
-        div_v = tk.Frame(task_frame, bg=pal.border, width=1)
-        div_v.pack(fill="y", side="left")
-        self._task_panel = TaskPanel(task_frame, pal)
-        self._task_panel.pack(fill="both", expand=True, side="left")
 
     # ------------------------------------------------------------------
     # Bootstrap: database, session, skills, cortex
@@ -180,6 +187,7 @@ class AgenticApp(tk.Tk):
         reg_docs()
 
         from core.skill_registry import skill_registry
+        self._tools_count = len(skill_registry.all_specs())
 
         # Build and wire Cortex
         self._cortex = Cortex(
@@ -199,6 +207,7 @@ class AgenticApp(tk.Tk):
         # Build views
         self._build_views()
         self._show_view("chat")
+        self._chat_view.set_runtime_info(cfg.get("model_id", "unknown"), self._tools_count)
 
         log.info("Agentic bootstrap complete")
         self._chat_view.append_system(
@@ -266,8 +275,11 @@ class AgenticApp(tk.Tk):
 
     def _on_deliberation_start(self, sig: Any) -> None:
         """Update status bar as soon as deliberation begins."""
+        self._run_on_ui(self._on_deliberation_start_ui)
+
+    def _on_deliberation_start_ui(self) -> None:
         if hasattr(self, "_chat_view"):
-            self._chat_view.set_status("Thinking…", busy=True)
+            self._chat_view.set_status("Working...", busy=True)
 
     def _on_deliberation_end(self, sig: Any) -> None:
         if hasattr(self, "_chat_view"):
@@ -275,8 +287,11 @@ class AgenticApp(tk.Tk):
 
     def _on_react_iteration(self, sig: Any) -> None:
         """Inform the user that the model is running tools and re-reasoning."""
-        iteration   = sig.payload.get("iteration", "?")
-        skills_run  = sig.payload.get("skills_run", [])
+        self._run_on_ui(self._on_react_iteration_ui, sig)
+
+    def _on_react_iteration_ui(self, sig: Any) -> None:
+        iteration = sig.payload.get("iteration", "?")
+        skills_run = sig.payload.get("skills_run", [])
         skill_names = ", ".join(skills_run) or "none"
         if hasattr(self, "_chat_view"):
             self._chat_view.set_status(
@@ -291,28 +306,169 @@ class AgenticApp(tk.Tk):
 
     def _on_model_loading(self, sig: Any) -> None:
         """Update the status bar with model loading progress."""
+        self._run_on_ui(self._on_model_loading_ui, sig)
+
+    def _on_model_loading_ui(self, sig: Any) -> None:
         stage    = sig.payload.get("stage", "")
         model_id = sig.payload.get("model_id", "model")
         # Show only the short name (last component of the HF repo path).
         short = model_id.split("/")[-1] if "/" in model_id else model_id
+        self._load_stage = stage
+        self._load_model_short = short
         if stage == "start":
+            self._load_started_at = time.monotonic()
+            self._load_long_hint_shown = False
+            self._load_last_download_pct = -1
+            self._load_download_pct = -1
+            self._start_loading_heartbeat()
             if hasattr(self, "_chat_view"):
                 self._chat_view.set_status(f"Loading {short}…", busy=True)
+                self._announce_loading_stage("Initializing model")
+        elif stage == "download_start":
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(f"Downloading model files: {short}…", busy=True)
+                self._announce_loading_stage("Downloading model files")
+        elif stage == "download":
+            pct = int(sig.payload.get("progress_pct", 0))
+            self._load_download_pct = pct
+            file_name = sig.payload.get("file", "")
+            if hasattr(self, "_chat_view"):
+                if file_name:
+                    self._chat_view.set_status(
+                        f"Downloading {short}: {pct}% ({file_name})",
+                        busy=True,
+                    )
+                else:
+                    self._chat_view.set_status(f"Downloading {short}: {pct}%", busy=True)
+                # Emit concise logs at meaningful percentage milestones.
+                if pct in (10, 25, 50, 75, 90, 100) and pct != self._load_last_download_pct:
+                    self._chat_view.append_info(f"Download progress: {pct}%")
+                    self._load_last_download_pct = pct
+        elif stage == "download_done":
+            self._load_download_pct = 100
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(f"Download complete: {short}", busy=True)
+                self._announce_loading_stage("Download complete, loading tokenizer")
+        elif stage == "download_retry":
+            attempt = int(sig.payload.get("attempt", 1))
+            max_attempts = int(sig.payload.get("max_attempts", 1))
+            retry_in_s = int(sig.payload.get("retry_in_s", 1))
+            if hasattr(self, "_chat_view"):
+                self._chat_view.set_status(
+                    f"Network unstable, retrying download ({attempt}/{max_attempts})…",
+                    busy=True,
+                )
+                self._chat_view.append_info(
+                    f"Download retry {attempt}/{max_attempts} in {retry_in_s}s"
+                )
+        elif stage == "download_cached":
+            self._load_download_pct = 100
+            if hasattr(self, "_chat_view"):
+                self._chat_view.append_info(
+                    "Using local cached model files (network unavailable)."
+                )
+        elif stage == "device_warning":
+            message = str(sig.payload.get("message", "Device fallback to CPU"))
+            if hasattr(self, "_chat_view"):
+                self._chat_view.append_info(message)
+                self._chat_view.set_status("Using CPU fallback", busy=True)
+        elif stage == "device_selected":
+            selected = str(sig.payload.get("selected_device", "cpu"))
+            torch_version = str(sig.payload.get("torch_version", "unknown"))
+            if hasattr(self, "_chat_view"):
+                self._chat_view.append_info(
+                    f"Execution device: {selected} (torch {torch_version})"
+                )
         elif stage == "tokenizer":
             if hasattr(self, "_chat_view"):
                 self._chat_view.set_status(f"Loading tokenizer: {short}…", busy=True)
+                self._announce_loading_stage("Tokenizer ready, preparing weights")
         elif stage == "weights":
             if hasattr(self, "_chat_view"):
                 self._chat_view.set_status(f"Loading weights: {short}…", busy=True)
+                self._announce_loading_stage("Loading model weights")
         elif stage == "done":
+            self._stop_loading_heartbeat()
             if hasattr(self, "_chat_view"):
                 self._chat_view.set_status("Model ready", busy=False)
                 self._chat_view.append_info(f"✓ Model loaded: {model_id}")
+                self._chat_view.set_runtime_info(model_id, self._tools_count)
         elif stage == "error":
+            self._stop_loading_heartbeat()
             error = sig.payload.get("error", "unknown error")
             log.error("Model load failed: %s – %s", model_id, error)
             if hasattr(self, "_chat_view"):
                 self._chat_view.set_status(f"Model load failed: {error[:60]}", busy=False)
+
+    def _run_on_ui(self, fn: Any, *args: Any) -> None:
+        """Run a callback in the Tk main thread to avoid thread-affinity errors."""
+        try:
+            if threading.current_thread() is threading.main_thread():
+                fn(*args)
+            else:
+                self.after(0, lambda: fn(*args))
+        except (RuntimeError, tk.TclError):
+            # Ignore late signals during shutdown.
+            return
+
+    def _start_loading_heartbeat(self) -> None:
+        """Show elapsed model-loading progress every second."""
+        if self._load_tick_job is not None:
+            self.after_cancel(self._load_tick_job)
+            self._load_tick_job = None
+
+        def _tick() -> None:
+            # Stop once model load enters a terminal state.
+            if self._load_stage in ("done", "error", ""):
+                self._load_tick_job = None
+                return
+
+            elapsed_s = int(max(0.0, time.monotonic() - self._load_started_at))
+            stage_label = {
+                "start": "Initializing",
+                "download_start": "Downloading model files",
+                "download": "Downloading",
+                "tokenizer": "Loading tokenizer",
+                "weights": "Loading weights",
+            }.get(self._load_stage, "Loading model")
+
+            if hasattr(self, "_chat_view"):
+                if self._load_stage in ("download_start", "download") and self._load_download_pct >= 0:
+                    status = (
+                        f"{stage_label}: {self._load_model_short}… "
+                        f"{self._load_download_pct}% · {elapsed_s}s"
+                    )
+                else:
+                    status = f"{stage_label}: {self._load_model_short}… {elapsed_s}s"
+                self._chat_view.set_status(
+                    status,
+                    busy=True,
+                )
+                # First model download can take minutes; show a one-time hint.
+                if elapsed_s >= 15 and not self._load_long_hint_shown:
+                    self._chat_view.append_info(
+                        "Model download in progress… first launch can take a few minutes "
+                        "depending on internet speed and model size."
+                    )
+                    self._load_long_hint_shown = True
+
+            self._load_tick_job = self.after(1000, _tick)
+
+        self._load_tick_job = self.after(1000, _tick)
+
+    def _stop_loading_heartbeat(self) -> None:
+        if self._load_tick_job is not None:
+            self.after_cancel(self._load_tick_job)
+            self._load_tick_job = None
+
+    def _announce_loading_stage(self, message: str) -> None:
+        """Append one-time stage logs in chat to make progress visible."""
+        if not hasattr(self, "_chat_view"):
+            return
+        if message == self._load_last_stage_announcement:
+            return
+        self._chat_view.append_info(message)
+        self._load_last_stage_announcement = message
 
     # ------------------------------------------------------------------
     # Session management

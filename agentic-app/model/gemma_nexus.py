@@ -47,8 +47,11 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from core.signal_lattice import SigKind, lattice
@@ -67,6 +70,10 @@ _GEN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-gen"
 # so the Settings quick-pick menu always shows families in the order below.
 MODEL_FAMILIES: dict[str, list[str]] = {
     "Gemma": [
+        "google/gemma-4-E2B-it",
+        "google/gemma-4-E4B-it",
+        "google/gemma-4-26B-A4B-it",
+        "google/gemma-4-31B-it",
         "google/gemma-3-1b-it",
         "google/gemma-3-4b-it",
         "google/gemma-3-12b-it",
@@ -158,6 +165,39 @@ def _supports_system_role(tokenizer: Any) -> bool:
         return False
 
 
+def _is_transient_download_error(exc: Exception) -> bool:
+    """
+    Return True for retryable hub/network failures.
+
+    We inspect the exception chain text because huggingface_hub wraps network
+    stack exceptions (requests/httpx/ssl/socket) into multiple layers.
+    """
+    msg = str(exc).lower()
+    retry_markers = (
+        "winerror 10054",
+        "connection was forcibly closed",
+        "handshake operation timed out",
+        "ssl",
+        "read timed out",
+        "connection reset",
+        "remote disconnected",
+        "temporarily unavailable",
+        "max retries exceeded",
+        "connection aborted",
+        "timeout",
+    )
+    return any(marker in msg for marker in retry_markers)
+
+
+def _format_error(exc: BaseException) -> str:
+    """Return a stable, non-empty error string for UI and logs."""
+    text = str(exc).strip()
+    if text:
+        return text
+    # Some exceptions (e.g. bare AssertionError) stringify to "".
+    return f"{type(exc).__name__}: {exc!r}"
+
+
 @dataclass
 class NexusResponse:
     text: str
@@ -247,12 +287,19 @@ class ModelNexus:
                 "Run: pip install transformers torch accelerate"
             ) from exc
 
+        # Download model snapshot first so we can emit real byte progress.
+        model_local_dir = self._download_snapshot_with_progress(model_id, hf_token)
+
         lattice.emit_kind(
             SigKind.MODEL_LOADING,
             {"stage": "tokenizer", "model_id": model_id},
             source="model_nexus",
         )
-        tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_local_dir,
+            token=hf_token,
+            local_files_only=True,
+        )
 
         # Probe the tokenizer once to determine if a native system role is
         # supported.  Llama 3.1+, Phi-4, Qwen 2.5 support it; Gemma does not.
@@ -268,6 +315,7 @@ class ModelNexus:
         load_kw: dict = {
             "token": hf_token,
             "low_cpu_mem_usage": True,
+            "local_files_only": True,
         }
 
         # Optional 4-bit quantization (requires bitsandbytes + CUDA/ROCm)
@@ -297,7 +345,39 @@ class ModelNexus:
                 else:
                     load_kw["device_map"] = {"": "cpu"}
             else:
-                load_kw["device_map"] = {"": device_pref}
+                if device_pref == "cuda" and not torch.cuda.is_available():
+                    load_kw["device_map"] = {"": "cpu"}
+                    lattice.emit_kind(
+                        SigKind.MODEL_LOADING,
+                        {
+                            "stage": "device_warning",
+                            "model_id": model_id,
+                            "message": (
+                                "CUDA requested but not available in this Python "
+                                "environment; falling back to CPU"
+                            ),
+                        },
+                        source="model_nexus",
+                    )
+                elif device_pref == "mps" and (
+                    not hasattr(torch.backends, "mps")
+                    or not torch.backends.mps.is_available()
+                ):
+                    load_kw["device_map"] = {"": "cpu"}
+                    lattice.emit_kind(
+                        SigKind.MODEL_LOADING,
+                        {
+                            "stage": "device_warning",
+                            "model_id": model_id,
+                            "message": (
+                                "MPS requested but not available in this Python "
+                                "environment; falling back to CPU"
+                            ),
+                        },
+                        source="model_nexus",
+                    )
+                else:
+                    load_kw["device_map"] = {"": device_pref}
 
         # Select a reduced-precision dtype to cut VRAM usage ~50 % vs float32.
         # bfloat16 is preferred for Ampere+ (wider dynamic range, no overflow
@@ -318,13 +398,32 @@ class ModelNexus:
                 else:
                     load_kw["torch_dtype"] = torch.float16
 
+        selected_device = load_kw.get("device_map", {"": "cpu"})
+        if selected_device == "auto":
+            selected_label = "cuda:auto"
+        elif isinstance(selected_device, dict):
+            selected_label = str(selected_device.get("", "cpu"))
+        else:
+            selected_label = str(selected_device)
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {
+                "stage": "device_selected",
+                "model_id": model_id,
+                "selected_device": selected_label,
+                "torch_cuda_available": bool(torch.cuda.is_available()),
+                "torch_version": str(getattr(torch, "__version__", "unknown")),
+            },
+            source="model_nexus",
+        )
+
         lattice.emit_kind(
             SigKind.MODEL_LOADING,
             {"stage": "weights", "model_id": model_id},
             source="model_nexus",
         )
         try:
-            model = AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
+            model = AutoModelForCausalLM.from_pretrained(model_local_dir, **load_kw)
         except Exception as exc:
             lattice.emit_kind(
                 SigKind.MODEL_LOADING,
@@ -346,6 +445,122 @@ class ModelNexus:
             {"stage": "done", "model_id": model_id},
             source="model_nexus",
         )
+
+    def _download_snapshot_with_progress(self, model_id: str, hf_token: str | None) -> str:
+        """
+        Download the model snapshot with real transfer progress signals.
+
+        Returns local snapshot directory path.
+        """
+        try:
+            from huggingface_hub import snapshot_download
+            from tqdm.auto import tqdm
+        except Exception:
+            # Fallback: if hub/tqdm is unavailable, let transformers handle it.
+            return model_id
+
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {"stage": "download_start", "model_id": model_id},
+            source="model_nexus",
+        )
+
+        class _ProgressTqdm(tqdm):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                # huggingface_hub may pass an internal `name` kwarg that
+                # standard tqdm does not accept.
+                kwargs.pop("name", None)
+                super().__init__(*args, **kwargs)
+                self._last_pct: int = -1
+
+            def update(self, n: int = 1) -> bool | None:
+                out = super().update(n)
+                total = int(self.total or 0)
+                done = int(self.n or 0)
+                if total > 0:
+                    pct = int((done * 100) / total)
+                    if pct != self._last_pct:
+                        self._last_pct = pct
+                        desc = str(getattr(self, "desc", "") or "")
+                        file_name = Path(desc).name if desc else ""
+                        lattice.emit_kind(
+                            SigKind.MODEL_LOADING,
+                            {
+                                "stage": "download",
+                                "model_id": model_id,
+                                "progress_pct": pct,
+                                "downloaded_bytes": done,
+                                "total_bytes": total,
+                                "file": file_name,
+                            },
+                            source="model_nexus",
+                        )
+                return out
+
+        max_attempts = 4
+        for attempt in range(1, max_attempts + 1):
+            try:
+                local_dir = snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                    resume_download=True,
+                    tqdm_class=_ProgressTqdm,
+                    # A slightly higher timeout reduces TLS-handshake flakiness
+                    # on slower links and busy Windows endpoints.
+                    etag_timeout=60,
+                    max_workers=4,
+                )
+                break
+            except Exception as exc:
+                is_transient = _is_transient_download_error(exc)
+                if is_transient and attempt < max_attempts:
+                    backoff_s = min(20, 2 ** attempt)
+                    lattice.emit_kind(
+                        SigKind.MODEL_LOADING,
+                        {
+                            "stage": "download_retry",
+                            "model_id": model_id,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "retry_in_s": backoff_s,
+                            "error": str(exc),
+                        },
+                        source="model_nexus",
+                    )
+                    time.sleep(backoff_s)
+                    continue
+
+                # Final fallback: use whatever is already present in local cache.
+                # If cache is complete this succeeds even when network is down.
+                try:
+                    local_dir = snapshot_download(
+                        repo_id=model_id,
+                        token=hf_token,
+                        local_files_only=True,
+                    )
+                    lattice.emit_kind(
+                        SigKind.MODEL_LOADING,
+                        {
+                            "stage": "download_cached",
+                            "model_id": model_id,
+                        },
+                        source="model_nexus",
+                    )
+                    break
+                except Exception:
+                    lattice.emit_kind(
+                        SigKind.MODEL_LOADING,
+                        {"stage": "error", "model_id": model_id, "error": str(exc)},
+                        source="model_nexus",
+                    )
+                    raise
+
+        lattice.emit_kind(
+            SigKind.MODEL_LOADING,
+            {"stage": "download_done", "model_id": model_id},
+            source="model_nexus",
+        )
+        return local_dir
 
     # ------------------------------------------------------------------
     # Availability
@@ -453,7 +668,7 @@ class ModelNexus:
         tokenizer = self._tokenizer
         model     = self._model
 
-        input_ids = tokenizer.apply_chat_template(
+        model_inputs = tokenizer.apply_chat_template(
             full_messages,
             add_generation_prompt=True,
             return_tensors="pt",
@@ -462,9 +677,25 @@ class ModelNexus:
                else {}),
         )
 
-        device     = next(model.parameters()).device
-        input_ids  = input_ids.to(device)
-        prompt_len = int(input_ids.shape[1])
+        device = next(model.parameters()).device
+        gen_inputs: dict[str, Any]
+        if isinstance(model_inputs, Mapping):
+            # Some chat templates (notably certain Phi/Llama variants) return
+            # a BatchEncoding-like mapping with input_ids/attention_mask.
+            gen_inputs = {
+                k: v.to(device) if hasattr(v, "to") else v
+                for k, v in model_inputs.items()
+            }
+        else:
+            # Most templates return a plain tensor of input_ids.
+            gen_inputs = {"input_ids": model_inputs.to(device)}
+
+        input_ids_tensor = gen_inputs.get("input_ids")
+        if input_ids_tensor is None or not hasattr(input_ids_tensor, "shape"):
+            raise RuntimeError(
+                "Tokenizer chat template did not return valid input_ids tensor"
+            )
+        prompt_len = int(input_ids_tensor.shape[1])
 
         streamer = TextIteratorStreamer(
             tokenizer,
@@ -473,13 +704,14 @@ class ModelNexus:
         )
 
         gen_kwargs: dict = {
-            "input_ids": input_ids,
             "streamer": streamer,
             "max_new_tokens": max_tokens,
             "do_sample": temperature > 0.0,
             "temperature": max(float(temperature), 1e-6),
-            "repetition_penalty": 1.1,
+            "repetition_penalty": 1.15,
+            "no_repeat_ngram_size": 4,
         }
+        gen_kwargs.update(gen_inputs)
 
         lattice.emit_kind(
             SigKind.DELIBERATION_START,
@@ -540,13 +772,14 @@ class ModelNexus:
         finally:
             if gen_errors:
                 err = gen_errors[0]
+                err_text = _format_error(err)
                 lattice.emit_kind(
                     SigKind.MODEL_ERROR,
-                    {"error": str(err)},
+                    {"error": err_text},
                     source="model_nexus",
                 )
-                log.exception("Generation failed: %s", err)
-                raise RuntimeError(str(err)) from err
+                log.exception("Generation failed: %s", err_text)
+                raise RuntimeError(err_text) from err
 
             lattice.emit_kind(
                 SigKind.MODEL_STREAM_DONE,

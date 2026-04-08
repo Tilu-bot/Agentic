@@ -28,6 +28,7 @@ Thread model:
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from typing import Callable
 
@@ -70,6 +71,22 @@ _CONTEXT_WARN_RATIO = 0.85
 # Base delay (seconds) for the exponential back-off between skill retries.
 # Actual delay = _RETRY_BASE_DELAY_S × attempt_number (1-indexed).
 _RETRY_BASE_DELAY_S = 0.5
+
+# Capability intents should be answered from the live registry to avoid
+# hallucinated tool names and verbose drift.
+_TOOLS_QUERY_RE = re.compile(
+    r"(what\s+tools|which\s+tools|list\s+available\s+tools|available\s+tools|"
+    r"what\s+can\s+you\s+do|capabilities)",
+    re.IGNORECASE,
+)
+
+
+def _fmt_error(exc: BaseException) -> str:
+    """Return a non-empty error string for UI-safe reporting."""
+    msg = str(exc).strip()
+    if msg:
+        return msg
+    return f"{type(exc).__name__}: {exc!r}"
 
 
 class Cortex:
@@ -218,6 +235,26 @@ class Cortex:
         # ── 1. Write user input to fluid memory ─────────────────────────
         self._memory.fluid_write("user", user_text)
 
+        # ── 1a. Grounded tools-overview path ───────────────────────────
+        # For capability questions, bypass free-form generation and answer
+        # directly from the registered skill specs.
+        if self._is_tools_query(user_text):
+            final_response = self._build_tools_overview()
+            if self._on_token:
+                try:
+                    self._on_token(final_response)
+                except Exception:
+                    pass
+
+            self._memory.fluid_write("assistant", final_response)
+            lattice.emit_kind(
+                SigKind.DELIBERATION_END,
+                {"response": final_response, "skills_used": 0},
+                source="cortex",
+            )
+            log.info("Deliberation complete (grounded tools overview)")
+            return
+
         # ── 2. Assemble context, ranked by query relevance ───────────────
         mem_ctx = self._memory.assemble_context(
             include_crystal=5, include_bedrock=10, query=user_text
@@ -276,6 +313,8 @@ class Cortex:
             )
 
         max_iterations = cfg.get("react_max_iterations", 6)
+        generation_temperature = float(cfg.get("generation_temperature", 0.25))
+        generation_max_tokens = int(cfg.get("generation_max_tokens", 512))
         final_response = ""
         total_skills_used = 0
 
@@ -294,8 +333,8 @@ class Cortex:
                 async for token in self._nexus.stream(
                     messages,
                     system=system_prompt,
-                    temperature=0.7,
-                    max_tokens=2048,
+                    temperature=generation_temperature,
+                    max_tokens=generation_max_tokens,
                     tools_schema=tools,
                 ):
                     response_parts.append(token)
@@ -308,8 +347,9 @@ class Cortex:
                             pass
 
             except Exception as exc:
-                log.exception("Model stream failed: %s", exc)
-                err_msg = f"\n[Model error: {exc}]"
+                err_text = _fmt_error(exc)
+                log.exception("Model stream failed: %s", err_text)
+                err_msg = f"\n[Model error: {err_text}]"
                 if self._on_token:
                     self._on_token(err_msg)
                 response_parts.append(err_msg)
@@ -387,8 +427,8 @@ class Cortex:
                 async for token in self._nexus.stream(
                     messages,
                     system=system_prompt,
-                    temperature=0.7,
-                    max_tokens=2048,
+                    temperature=generation_temperature,
+                    max_tokens=generation_max_tokens,
                     tools_schema=None,  # force direct answer, no tool calls
                 ):
                     reflect_parts.append(token)
@@ -426,6 +466,25 @@ class Cortex:
             "Deliberation complete (%d skills, %d chars)",
             total_skills_used, len(final_response),
         )
+
+    def _is_tools_query(self, text: str) -> bool:
+        return bool(_TOOLS_QUERY_RE.search(text))
+
+    def _build_tools_overview(self) -> str:
+        specs = self._registry.all_specs()
+        if not specs:
+            return "No tools are currently registered."
+
+        lines = [
+            "Here are the available tools and when I use each:",
+            "",
+        ]
+        for spec in specs:
+            desc = spec.description.strip().rstrip(".")
+            lines.append(f"- {spec.name}: {desc}.")
+        lines.append("")
+        lines.append("I use these automatically when your request clearly needs them.")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Context-window helpers

@@ -36,7 +36,11 @@ class MemoryView(tk.Frame):
         tabs = AgFrame(self, pal)
         tabs.pack(fill="x", padx=pad, pady=(0, M.padding_sm))
         self._tab_var = tk.StringVar(value="bedrock")
-        for label, val in (("Long-Term Facts (Bedrock)", "bedrock"), ("Episode Log (Crystal)", "crystal")):
+        for label, val in (
+            ("Session (Fluid)", "fluid"),
+            ("Long-Term Facts (Bedrock)", "bedrock"),
+            ("Episode Log (Crystal)", "crystal"),
+        ):
             tk.Radiobutton(
                 tabs,
                 text=label, value=val,
@@ -64,7 +68,20 @@ class MemoryView(tk.Frame):
         tab = self._tab_var.get()
         self._display.clear()
 
-        if tab == "bedrock":
+        if tab == "fluid":
+            entries = mem.fluid_read()
+            if not entries:
+                self._display.append("No session messages yet.\n", tag="dim")
+            else:
+                import time
+                for e in entries:
+                    ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
+                    self._display.append(f"[{ts}] {e.role.upper()}\n", tag="info")
+                    self._display.append(e.text + "\n")
+                    if e.tags:
+                        self._display.append(f"tags: {', '.join(e.tags)}\n", tag="dim")
+                    self._display.append("\n")
+        elif tab == "bedrock":
             facts = mem.bedrock_query(limit=50)
             if not facts:
                 self._display.append("No facts stored yet.\n", tag="dim")

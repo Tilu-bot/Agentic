@@ -37,6 +37,20 @@ _BLOCKED_DIRS: frozenset[Path] = frozenset({
 })
 
 
+def _blocked_dirs() -> set[Path]:
+    """Return platform-specific blocked system directories."""
+    blocked = set(_BLOCKED_DIRS)
+    # Windows hardening: block core OS and program directories.
+    win_dir = os.environ.get("WINDIR")
+    if win_dir:
+        blocked.add(Path(win_dir).resolve())
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        p = os.environ.get(env_name)
+        if p:
+            blocked.add(Path(p).resolve())
+    return blocked
+
+
 def _safe_path(raw: str) -> Path:
     """
     Resolve *raw* to a canonical absolute path and raise PermissionError if
@@ -50,8 +64,9 @@ def _safe_path(raw: str) -> Path:
     # Materialise all ancestors once, including the path itself, to avoid
     # redundant parent-chain reconstruction on each iteration.
     ancestors = [p, *p.parents]
+    blocked_dirs = _blocked_dirs()
     for ancestor in ancestors:
-        if ancestor in _BLOCKED_DIRS:
+        if ancestor in blocked_dirs:
             raise PermissionError(
                 f"Access to '{p}' is not allowed (falls under blocked directory '{ancestor}')"
             )

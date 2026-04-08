@@ -83,7 +83,7 @@ class TaskPanel(tk.Frame):
         pal = self._pal
 
         AgLabel(
-            self, pal, text="Active Tasks",
+            self, pal, text="Activity",
             bold=True, size=FONTS.size_sm,
             bg=pal.bg_base,
         ).pack(fill="x", padx=M.padding_sm, pady=(M.padding_sm, M.padding_xs))
@@ -104,6 +104,22 @@ class TaskPanel(tk.Frame):
         self._inner.bind("<Configure>", self._on_inner_resize)
         self._canvas.bind("<Configure>", self._on_canvas_resize)
 
+        # Activity feed below task cards keeps the panel informative even when
+        # no long-running fibers are active.
+        self._activity = tk.Text(
+            self,
+            height=12,
+            bg=pal.bg_raised,
+            fg=pal.fg_muted,
+            relief="flat",
+            wrap="word",
+            state="disabled",
+            font=(FONTS.family_code, FONTS.size_xs),
+            padx=M.padding_sm,
+            pady=M.padding_sm,
+        )
+        self._activity.pack(fill="x", padx=M.padding_sm, pady=(M.padding_xs, M.padding_sm))
+
     def _on_inner_resize(self, _: Any) -> None:
         self._canvas.config(scrollregion=self._canvas.bbox("all"))
 
@@ -120,6 +136,38 @@ class TaskPanel(tk.Frame):
         lattice.on(SigKind.TASK_COMPLETED, self._handle_completed)
         lattice.on(SigKind.TASK_FAILED,    self._handle_failed)
         lattice.on(SigKind.TASK_CANCELLED, self._handle_cancelled)
+        lattice.on(SigKind.DELIBERATION_START, self._handle_deliberation_start)
+        lattice.on(SigKind.REACT_ITERATION, self._handle_react_iteration)
+        lattice.on(SigKind.SKILL_INVOKED, self._handle_skill_invoked)
+        lattice.on(SigKind.SKILL_RESULT, self._handle_skill_result)
+        lattice.on(SigKind.SKILL_ERROR, self._handle_skill_error)
+        lattice.on(SigKind.MODEL_LOADING, self._handle_model_loading)
+
+    def _handle_deliberation_start(self, sig: Signal) -> None:
+        self.after(0, self._append_activity, "Reasoning started")
+
+    def _handle_react_iteration(self, sig: Signal) -> None:
+        i = sig.payload.get("iteration", "?")
+        tools = ", ".join(sig.payload.get("skills_run", [])) or "none"
+        self.after(0, self._append_activity, f"Iteration {i}: tools {tools}")
+
+    def _handle_skill_invoked(self, sig: Signal) -> None:
+        skill = sig.payload.get("skill", "unknown")
+        self.after(0, self._append_activity, f"Skill invoked: {skill}")
+
+    def _handle_skill_result(self, sig: Signal) -> None:
+        skill = sig.payload.get("skill", "unknown")
+        self.after(0, self._append_activity, f"Skill done: {skill}")
+
+    def _handle_skill_error(self, sig: Signal) -> None:
+        skill = sig.payload.get("skill", "unknown")
+        err = str(sig.payload.get("error", ""))[:80]
+        self.after(0, self._append_activity, f"Skill error: {skill} ({err})")
+
+    def _handle_model_loading(self, sig: Signal) -> None:
+        stage = str(sig.payload.get("stage", ""))
+        if stage in ("start", "download_start", "tokenizer", "weights", "done", "error"):
+            self.after(0, self._append_activity, f"Model stage: {stage}")
 
     def _handle_spawned(self, sig: Signal) -> None:
         fid   = sig.payload["fiber_id"]
@@ -180,3 +228,14 @@ class TaskPanel(tk.Frame):
         card = self._cards.pop(fiber_id, None)
         if card:
             card.destroy()
+
+    def _append_activity(self, text: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        self._activity.config(state="normal")
+        self._activity.insert("end", f"[{ts}] {text}\n")
+        # Keep the feed bounded.
+        lines = int(self._activity.index("end-1c").split(".")[0])
+        if lines > 200:
+            self._activity.delete("1.0", "40.0")
+        self._activity.see("end")
+        self._activity.config(state="disabled")

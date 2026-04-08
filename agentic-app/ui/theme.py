@@ -44,57 +44,57 @@ class Palette:
 
 
 DARK = Palette(
-    bg_deep   = "#0d0f14",
-    bg_base   = "#13161e",
-    bg_raised = "#1c2030",
-    bg_hover  = "#242840",
-    bg_input  = "#1a1e2e",
+    bg_deep   = "#ffffff",
+    bg_base   = "#fafbfc",
+    bg_raised = "#ffffff",
+    bg_hover  = "#f0f4f9",
+    bg_input  = "#ffffff",
 
-    fg_primary = "#e8eaf6",
-    fg_muted   = "#9fa8c0",
-    fg_dim     = "#5a6080",
+    fg_primary = "#0f172a",
+    fg_muted   = "#475569",
+    fg_dim     = "#94a3b8",
 
-    accent       = "#6c8ef5",
-    accent_hover = "#8ca8ff",
-    accent_dim   = "#3a4e8a",
+    accent       = "#6366f1",
+    accent_hover = "#818cf8",
+    accent_dim   = "#e0e7ff",
 
-    ok     = "#4caf80",
-    warn   = "#ffb347",
-    danger = "#ef5350",
-    info   = "#5bc8f5",
+    ok     = "#10b981",
+    warn   = "#f59e0b",
+    danger = "#ef4444",
+    info   = "#3b82f6",
 
-    border     = "#2c3248",
-    border_dim = "#1c2030",
+    border     = "#e2e8f0",
+    border_dim = "#cbd5e1",
 
-    scroll_bg    = "#1c2030",
-    scroll_thumb = "#3a4e8a",
+    scroll_bg    = "#f1f5f9",
+    scroll_thumb = "#cbd5e1",
 )
 
 LIGHT = Palette(
-    bg_deep   = "#f0f2f8",
-    bg_base   = "#ffffff",
-    bg_raised = "#f7f9ff",
-    bg_hover  = "#e8ecff",
+    bg_deep   = "#ffffff",
+    bg_base   = "#fafbfc",
+    bg_raised = "#ffffff",
+    bg_hover  = "#f0f4f9",
     bg_input  = "#ffffff",
 
-    fg_primary = "#1a1e2e",
-    fg_muted   = "#4a5070",
-    fg_dim     = "#9fa8c0",
+    fg_primary = "#0f172a",
+    fg_muted   = "#475569",
+    fg_dim     = "#94a3b8",
 
-    accent       = "#4060d0",
-    accent_hover = "#5070e0",
-    accent_dim   = "#c0ccff",
+    accent       = "#6366f1",
+    accent_hover = "#818cf8",
+    accent_dim   = "#e0e7ff",
 
-    ok     = "#2e7d52",
-    warn   = "#b86800",
-    danger = "#c62828",
-    info   = "#0078b8",
+    ok     = "#10b981",
+    warn   = "#f59e0b",
+    danger = "#ef4444",
+    info   = "#3b82f6",
 
-    border     = "#ccd0e0",
-    border_dim = "#e0e4f0",
+    border     = "#e2e8f0",
+    border_dim = "#cbd5e1",
 
-    scroll_bg    = "#e8ecff",
-    scroll_thumb = "#8090c0",
+    scroll_bg    = "#f1f5f9",
+    scroll_thumb = "#cbd5e1",
 )
 
 
@@ -113,29 +113,29 @@ class Typography:
 
 FONTS = Typography(
     family_ui   = "Segoe UI",
-    family_code = "Consolas",
-    size_xs = 9,
-    size_sm = 10,
-    size_md = 12,
-    size_lg = 14,
-    size_xl = 16,
-    size_h1 = 22,
-    size_h2 = 17,
+    family_code = "Monaco",
+    size_xs = 12,
+    size_sm = 13,
+    size_md = 15,
+    size_lg = 17,
+    size_xl = 20,
+    size_h1 = 36,
+    size_h2 = 28,
 )
 
 
 @dataclass(frozen=True)
 class Metrics:
-    padding_xs: int = 4
-    padding_sm: int = 8
-    padding_md: int = 14
-    padding_lg: int = 20
-    corner:     int = 8
-    corner_sm:  int = 4
+    padding_xs: int = 6
+    padding_sm: int = 12
+    padding_md: int = 16
+    padding_lg: int = 24
+    corner:     int = 12
+    corner_sm:  int = 6
     border_w:   int = 1
-    icon_sm:    int = 16
-    icon_md:    int = 24
-    sidebar_w:  int = 220
+    icon_sm:    int = 18
+    icon_md:    int = 28
+    sidebar_w:  int = 260
 
 
 M = Metrics()

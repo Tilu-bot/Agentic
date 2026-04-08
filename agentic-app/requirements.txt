@@ -16,9 +16,19 @@ accelerate>=1.2.0
 
 # HuggingFace Hub helpers (model card fetch, cache management in Settings)
 huggingface_hub>=0.27.0
+# Progress bars for model snapshot download percentage updates
+tqdm>=4.67.0
 
 # Async HTTP client for the web-fetch skill
 httpx>=0.28.0
+# Pillow for optional icon image support
+Pillow>=11.0.0
+# TLS certificate bundle for stable HTTPS verification
+certifi>=2024.8.30
+# Open-source DuckDuckGo search client (no API key)
+duckduckgo-search>=7.0.0
+# Renamed successor package for DuckDuckGo search
+ddgs>=8.0.0
 
 # Document reader skills (PDF, Excel, Word, PowerPoint)
 pypdf>=5.1.0
@@ -28,3 +38,7 @@ python-pptx>=1.0.2
 
 # PyInstaller for the standalone desktop app bundle
 pyinstaller>=6.11.0
+
+# PyQt6 - Professional native desktop GUI (recommended over Tkinter)
+PyQt6>=6.8.0
+PyQt6-WebEngine>=6.8.0

@@ -78,52 +78,73 @@ echo [OK] PyInstaller bundle created: dist\Agentic\
 echo.
 echo [4/4] Compiling Windows installer with Inno Setup...
 
-:: Try to find iscc.exe in the standard Inno Setup install locations
-set "ISCC="
-for %%p in (
-    "%ProgramFiles(x86)%\Inno Setup 6\iscc.exe"
-    "%ProgramFiles%\Inno Setup 6\iscc.exe"
-    "C:\Program Files (x86)\Inno Setup 6\iscc.exe"
-    "C:\Program Files\Inno Setup 6\iscc.exe"
-) do (
-    if exist %%p (
-        set "ISCC=%%p"
-        goto :found_iscc
-    )
-)
+:: Add common Inno Setup install locations to PATH for this script session.
+set "PATH=%PATH%;C:\Program Files (x86)\Inno Setup 6;C:\Program Files\Inno Setup 6"
 
-:: Try PATH
-where iscc >nul 2>&1 && set "ISCC=iscc"
+:: Detect compiler from PATH.
+where iscc >nul 2>&1
+if not errorlevel 1 goto :compile_installer
 
-:found_iscc
-if "%ISCC%"=="" (
-    echo.
-    echo [ERROR] Inno Setup Compiler (iscc.exe) not found.
-    echo         Install Inno Setup 6 from:  https://jrsoftware.org/isdl.php
-    echo.
-    echo         The PyInstaller bundle is ready at: dist\Agentic\
-    echo         You can run dist\Agentic\Agentic.exe directly without an installer.
-    pause & exit /b 1
-)
+echo [WARN] Inno Setup Compiler (iscc.exe) not found.
+echo       Attempting automatic install via winget...
 
+where winget >nul 2>&1
+if errorlevel 1 goto :no_winget
+
+winget install --id JRSoftware.InnoSetup -e --silent --accept-package-agreements --accept-source-agreements
+if errorlevel 1 goto :install_failed
+
+echo [OK] Inno Setup installed.
+goto :retry_iscc
+
+:no_winget
+echo [WARN] winget is not available on this system.
+goto :retry_iscc
+
+:install_failed
+echo [WARN] Automatic Inno Setup install failed.
+
+:retry_iscc
+set "PATH=%PATH%;C:\Program Files (x86)\Inno Setup 6;C:\Program Files\Inno Setup 6"
+where iscc >nul 2>&1
+if errorlevel 1 goto :no_iscc
+
+:compile_installer
 if not exist "installer" mkdir "installer"
-%ISCC% setup.iss
+iscc setup.iss
 if errorlevel 1 (
     echo [ERROR] Inno Setup compilation failed. See output above.
     pause & exit /b 1
 )
+goto :done
 
+:no_iscc
+echo.
+echo [WARN] Inno Setup Compiler is still unavailable.
+echo        Install manually from: https://jrsoftware.org/isdl.php
+echo.
+echo        The PyInstaller bundle is ready at: dist\Agentic\
+echo        You can run dist\Agentic\Agentic.exe directly without an installer.
+
+:done
 :: ── Done ─────────────────────────────────────────────────────────────────
 echo.
 echo ============================================================
 echo  BUILD COMPLETE
 echo ============================================================
 echo.
-echo  Installer : installer\Agentic-Setup.exe
-echo  Portable  : dist\Agentic\Agentic.exe
-echo.
-echo  Distribute "installer\Agentic-Setup.exe" to users.
-echo  Double-clicking it starts the installation wizard.
+if exist "installer\Agentic-Setup.exe" (
+    echo  Installer : installer\Agentic-Setup.exe
+    echo  Portable  : dist\Agentic\Agentic.exe
+    echo.
+    echo  Distribute "installer\Agentic-Setup.exe" to users.
+    echo  Double-clicking it starts the installation wizard.
+) else (
+    echo  Installer : not generated (Inno Setup unavailable)
+    echo  Portable  : dist\Agentic\Agentic.exe
+    echo.
+    echo  Run this script again after Inno Setup is available.
+)
 echo.
 pause
 endlocal
