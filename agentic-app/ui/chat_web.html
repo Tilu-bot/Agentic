@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentic Chat</title>
+<style>
+/* ── Reset ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Root ── */
+html, body {
+  background: #0f1117;
+  color: #e2e8f0;
+  font-family: "Segoe UI", "Inter", "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  overflow-x: hidden;
+  height: 100%;
+}
+
+/* ── Message list ── */
+#messages {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 28px 24px 40px;
+  min-height: 100%;
+}
+
+/* ── Empty / welcome state ── */
+#welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 60vh;
+  text-align: center;
+  color: #475569;
+  animation: fadeIn 0.4s ease;
+}
+#welcome .logo { font-size: 52px; filter: drop-shadow(0 0 12px #6366f180); }
+#welcome h2 { font-size: 24px; font-weight: 700; color: #94a3b8; }
+#welcome p  { font-size: 14px; max-width: 380px; color: #64748b; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 4px; }
+.chip {
+  background: #1e2235;
+  border: 1px solid #2d3149;
+  border-radius: 20px;
+  padding: 7px 16px;
+  font-size: 13px;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.chip:hover { background: #312e81; border-color: #4f46e5; color: #c7d2fe; }
+
+/* ── Message row ── */
+.msg { display: flex; flex-direction: column; animation: fadeUp 0.2s ease; max-width: 100%; }
+
+@keyframes fadeIn  { from { opacity:0; } to { opacity:1; } }
+@keyframes fadeUp  { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+
+/* ── Avatars / meta row ── */
+.meta { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.meta .role-label { font-size: 12px; font-weight: 600; letter-spacing: 0.4px; }
+.msg.user .meta { flex-direction: row-reverse; }
+.msg.user .role-label   { color: #818cf8; }
+.msg.assistant .role-label { color: #34d399; }
+.msg.system .role-label { color: #f59e0b; }
+
+/* ── Bubbles ── */
+.bubble {
+  display: inline-block;
+  padding: 12px 16px;
+  border-radius: 14px;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  max-width: 85%;
+  font-size: 15px;
+}
+
+.msg.user     { align-items: flex-end; }
+.msg.user     .bubble {
+  background: linear-gradient(135deg, #312e81 0%, #3730a3 100%);
+  color: #e0e7ff;
+  border-bottom-right-radius: 4px;
+}
+
+.msg.assistant { align-items: flex-start; }
+.msg.assistant .bubble {
+  background: #1e2235;
+  color: #e2e8f0;
+  border-bottom-left-radius: 4px;
+  border: 1px solid #2d3149;
+}
+
+.msg.system   { align-items: flex-start; }
+.msg.system   .bubble {
+  background: #1c2a24;
+  color: #6ee7b7;
+  border-left: 3px solid #10b981;
+  border-radius: 8px;
+  font-size: 13px;
+  font-style: italic;
+  white-space: pre-wrap;
+}
+
+.msg.info     { align-items: center; }
+.msg.info     .bubble {
+  background: transparent;
+  color: #475569;
+  font-size: 12px;
+  font-style: italic;
+  border: none;
+  padding: 2px 8px;
+}
+
+/* ── Timestamp ── */
+.ts { font-size: 11px; color: #334155; margin-top: 3px; }
+.msg.user .ts { text-align: right; }
+
+/* ── Streaming cursor ── */
+.cursor {
+  display: inline-block;
+  width: 2px; height: 1em;
+  background: #6366f1;
+  border-radius: 1px;
+  vertical-align: text-bottom;
+  margin-left: 2px;
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+/* ── Reasoning prefix ── */
+.reasoning { font-size: 12px; color: #475569; font-style: italic; margin-bottom: 4px; }
+
+/* ── Markdown: code blocks ── */
+pre {
+  background: #0d1017;
+  border: 1px solid #2d3149;
+  border-radius: 8px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 10px 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+code {
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", "Monaco", monospace;
+  font-size: 13px;
+}
+:not(pre) > code {
+  background: #252840;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #c7d2fe;
+  font-size: 93%;
+}
+
+/* ── Markdown: text ── */
+h1 { font-size: 20px; color: #c7d2fe; margin: 14px 0 6px; }
+h2 { font-size: 17px; color: #c7d2fe; margin: 12px 0 5px; }
+h3 { font-size: 15px; color: #c7d2fe; margin: 10px 0 4px; }
+p  { margin: 5px 0; }
+ul, ol { margin: 6px 0; padding-left: 22px; }
+li { margin: 3px 0; }
+a  { color: #818cf8; text-decoration: underline; text-underline-offset: 2px; }
+a:hover { color: #a5b4fc; }
+blockquote {
+  border-left: 3px solid #4f46e5;
+  margin: 8px 0;
+  padding: 4px 14px;
+  color: #94a3b8;
+  font-style: italic;
+}
+hr {
+  border: none;
+  border-top: 1px solid #2d3149;
+  margin: 14px 0;
+}
+strong { color: #e0e7ff; font-weight: 700; }
+em     { color: #c4b5fd; font-style: italic; }
+
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
+th { background: #252840; color: #94a3b8; font-weight: 600; padding: 7px 12px; text-align: left; border-bottom: 1px solid #2d3149; }
+td { padding: 7px 12px; border-bottom: 1px solid #1e2235; }
+tr:last-child td { border-bottom: none; }
+</style>
+</head>
+<body>
+<div id="messages">
+  <div id="welcome">
+    <div class="logo">✦</div>
+    <h2>Agentic</h2>
+    <p>Your local AI assistant. Powered by the Reactive Cortex Architecture — no cloud, no API keys.</p>
+    <div class="chip-row">
+      <div class="chip" onclick="sendSuggestion('What can you do?')">What can you do?</div>
+      <div class="chip" onclick="sendSuggestion('List available tools')">List available tools</div>
+      <div class="chip" onclick="sendSuggestion('Help me write some code')">Help me write code</div>
+      <div class="chip" onclick="sendSuggestion('Search the web for me')">Search the web</div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ── State ── */
+var _currentMsgId   = null;
+var _currentRawText = "";
+var _msgCounter     = 0;
+var _suggestionCb   = null;   // set by Python via window._suggestionCallback
+
+/* ── Helpers ── */
+function _esc(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
+          .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+function _ts() {
+  var d = new Date();
+  return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2);
+}
+
+function _scroll() {
+  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+}
+
+function _hideWelcome() {
+  var w = document.getElementById("welcome");
+  if (w) { w.style.animation = "none"; w.remove(); }
+}
+
+/* ── Inline markdown ── */
+function _inline(t) {
+  // Bold
+  t = t.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  t = t.replace(/__([^_\n]+)__/g,     "<strong>$1</strong>");
+  // Italic
+  t = t.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+  t = t.replace(/_([^_\n]+)_/g,   "<em>$1</em>");
+  // Inline code
+  t = t.replace(/`([^`\n]+)`/g, function(_,c){ return "<code>"+_esc(c)+"</code>"; });
+  // Links
+  t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+  return t;
+}
+
+function _renderMarkdown(text) {
+  var lines   = text.split("\n");
+  var out     = [];
+  var inCode  = false;
+  var codeLang= "";
+  var codeAcc = [];
+  var inUl    = false;
+  var inOl    = false;
+
+  function closeLists() {
+    if (inUl) { out.push("</ul>"); inUl = false; }
+    if (inOl) { out.push("</ol>"); inOl = false; }
+  }
+  function openUl() { if (!inUl) { if(inOl){out.push("</ol>");inOl=false;} out.push("<ul>"); inUl=true; } }
+  function openOl() { if (!inOl) { if(inUl){out.push("</ul>");inUl=false;} out.push("<ol>"); inOl=true; } }
+
+  for (var i = 0; i < lines.length; i++) {
+    var L = lines[i];
+
+    /* code fence */
+    if (L.startsWith("```")) {
+      if (!inCode) {
+        closeLists();
+        inCode = true; codeLang = L.slice(3).trim(); codeAcc = [];
+      } else {
+        inCode = false;
+        var cls = codeLang ? ' class="language-'+_esc(codeLang)+'"' : "";
+        out.push("<pre><code"+cls+">"+_esc(codeAcc.join("\n"))+"</code></pre>");
+      }
+      continue;
+    }
+    if (inCode) { codeAcc.push(L); continue; }
+
+    /* headers */
+    if (L.startsWith("### ")) { closeLists(); out.push("<h3>"+_inline(L.slice(4))+"</h3>"); continue; }
+    if (L.startsWith("## "))  { closeLists(); out.push("<h2>"+_inline(L.slice(3))+"</h2>"); continue; }
+    if (L.startsWith("# "))   { closeLists(); out.push("<h1>"+_inline(L.slice(2))+"</h1>"); continue; }
+
+    /* hr */
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(L.trim())) { closeLists(); out.push("<hr>"); continue; }
+
+    /* blockquote */
+    if (L.startsWith("> ")) { closeLists(); out.push("<blockquote>"+_inline(L.slice(2))+"</blockquote>"); continue; }
+
+    /* table row (simple) */
+    if (L.startsWith("|") && L.endsWith("|")) {
+      closeLists();
+      /* skip separator rows like |---|---| */
+      if (/^\|[-:| ]+\|$/.test(L)) continue;
+      var cells = L.slice(1,-1).split("|").map(function(c){ return c.trim(); });
+      var row = cells.map(function(c){ return "<td>"+_inline(c)+"</td>"; }).join("");
+      out.push("<table><tr>"+row+"</tr></table>");
+      continue;
+    }
+
+    /* unordered list */
+    var ulm = L.match(/^([-*+]) (.+)/);
+    if (ulm) { openUl(); out.push("<li>"+_inline(ulm[2])+"</li>"); continue; }
+
+    /* ordered list */
+    var olm = L.match(/^\d+\. (.+)/);
+    if (olm) { openOl(); out.push("<li>"+_inline(olm[1])+"</li>"); continue; }
+
+    closeLists();
+    if (L.trim() === "") {
+      out.push("<br>");
+    } else {
+      out.push("<p>"+_inline(L)+"</p>");
+    }
+  }
+
+  closeLists();
+  if (inCode && codeAcc.length) {
+    out.push("<pre><code>"+_esc(codeAcc.join("\n"))+"</code></pre>");
+  }
+  return out.join("");
+}
+
+/* ── Public API (called by Python via runJavaScript) ── */
+
+window.addUserMessage = function(text) {
+  _hideWelcome();
+  _msgCounter++;
+  var id  = "msg-"+_msgCounter;
+  var div = document.createElement("div");
+  div.className = "msg user"; div.id = id;
+  div.innerHTML =
+    '<div class="meta"><span class="role-label">You</span></div>' +
+    '<div class="bubble">'+_esc(text)+'</div>' +
+    '<div class="ts">'+_ts()+'</div>';
+  document.getElementById("messages").appendChild(div);
+  _scroll();
+};
+
+window.beginAssistantMessage = function() {
+  _hideWelcome();
+  _currentRawText = "";
+  _msgCounter++;
+  _currentMsgId = "msg-"+_msgCounter;
+  var div = document.createElement("div");
+  div.className = "msg assistant"; div.id = _currentMsgId;
+  div.innerHTML =
+    '<div class="meta"><span class="role-label">Agentic</span></div>' +
+    '<div class="bubble" id="'+_currentMsgId+'-b"><span class="cursor"></span></div>';
+  document.getElementById("messages").appendChild(div);
+  _scroll();
+};
+
+window.appendTokens = function(text) {
+  if (!_currentMsgId) return;
+  _currentRawText += text;
+  var b = document.getElementById(_currentMsgId+"-b");
+  if (!b) return;
+  // Show raw text + cursor during streaming (fast, no re-render)
+  b.textContent = _currentRawText;
+  var cur = document.createElement("span");
+  cur.className = "cursor";
+  b.appendChild(cur);
+  _scroll();
+};
+
+window.finishStreaming = function() {
+  if (!_currentMsgId) return;
+  var b   = document.getElementById(_currentMsgId+"-b");
+  var msg = document.getElementById(_currentMsgId);
+  if (b && _currentRawText) {
+    b.innerHTML = _renderMarkdown(_currentRawText);
+  }
+  if (msg) {
+    var ts = document.createElement("div");
+    ts.className = "ts"; ts.textContent = _ts();
+    msg.appendChild(ts);
+  }
+  _currentMsgId   = null;
+  _currentRawText = "";
+  _scroll();
+};
+
+window.addSystemMessage = function(text) {
+  _hideWelcome();
+  _msgCounter++;
+  var div = document.createElement("div");
+  div.className = "msg system";
+  div.innerHTML = '<div class="meta"><span class="role-label">System</span></div><div class="bubble">'+_esc(text)+'</div>';
+  document.getElementById("messages").appendChild(div);
+  _scroll();
+};
+
+window.addInfoMessage = function(text) {
+  _msgCounter++;
+  var div = document.createElement("div");
+  div.className = "msg info";
+  div.innerHTML = '<div class="bubble">'+_esc(text)+'</div>';
+  document.getElementById("messages").appendChild(div);
+  _scroll();
+};
+
+window.clearMessages = function() {
+  var c = document.getElementById("messages");
+  c.innerHTML = "";
+  var w = document.createElement("div");
+  w.id = "welcome";
+  w.innerHTML =
+    '<div class="logo">✦</div><h2>Agentic</h2>' +
+    '<p>Your local AI assistant. No cloud, no API keys.</p>' +
+    '<div class="chip-row">' +
+    '<div class="chip" onclick="sendSuggestion(\'What can you do?\')">What can you do?</div>' +
+    '<div class="chip" onclick="sendSuggestion(\'List available tools\')">List available tools</div>' +
+    '<div class="chip" onclick="sendSuggestion(\'Help me write some code\')">Help me write code</div>' +
+    '</div>';
+  c.appendChild(w);
+  _currentMsgId = null; _currentRawText = "";
+};
+
+window.sendSuggestion = function(text) {
+  if (window._suggestionCallback) {
+    window._suggestionCallback(text);
+  }
+};
+</script>
+</body>
+</html>
