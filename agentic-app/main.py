@@ -1,16 +1,14 @@
 """
 Agentic – Application Entry Point
 ===================================
-Bootstraps the desktop application:
+Bootstraps the desktop application with the PyQt6 UI.
+
   1. Adjusts sys.path so all packages resolve correctly.
-  2. Applies DPI awareness (Windows) and scaling (macOS).
-  3. Launches the AgenticApp Tk root window.
+  2. Launches the AgenticQtApp (PyQt6 + WebEngine).
 """
 from __future__ import annotations
 
-import os
 import sys
-import platform
 from pathlib import Path
 
 # Ensure the agentic-app directory is on the path
@@ -19,28 +17,9 @@ if str(_APP_DIR) not in sys.path:
     sys.path.insert(0, str(_APP_DIR))
 
 
-def _apply_dpi_awareness() -> None:
-    """Enable high-DPI rendering where supported."""
-    _os = platform.system()
-    if _os == "Windows":
-        try:
-            from ctypes import windll
-            windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
-    elif _os == "Darwin":
-        # macOS: tkinter handles Retina displays automatically
-        pass
-
-
 def main() -> None:
-    _apply_dpi_awareness()
-
-    import tkinter as tk
-    from ui.app import AgenticApp
-
-    app = AgenticApp()
-    app.mainloop()
+    from ui.pyqt_integrated import main as qt_main
+    qt_main()
 
 
 if __name__ == "__main__":
