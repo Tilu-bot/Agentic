@@ -216,7 +216,7 @@ class TaskPanelQt(QWidget):
     # ------------------------------------------------------------------
 
     def _on_spawned(self, fiber_id: str, label: str) -> None:
-        item   = QListWidgetItem(self._fiber_list)
+        item = QListWidgetItem(self._fiber_list)
         widget = _FiberItem(label)
         item.setSizeHint(widget.sizeHint())
         self._fiber_list.addItem(item)

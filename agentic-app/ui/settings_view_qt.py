@@ -149,7 +149,7 @@ class SettingsViewQt(QWidget):
         form.addRow(self._lbl("Device"), device_row)
 
         # 4-bit quantization
-        self._q4_check = QCheckBox("4-bit quantization  (requires bitsandbytes + GPU)")
+        self._q4_check = QCheckBox("4-bit quantization (requires bitsandbytes + GPU)")
         self._q4_check.setChecked(cfg.get("quantize_4bit", False))
         form.addRow(self._lbl(""), self._q4_check)
 

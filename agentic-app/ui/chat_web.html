@@ -195,12 +195,7 @@ tr:last-child td { border-bottom: none; }
     <div class="logo">✦</div>
     <h2>Agentic</h2>
     <p>Your local AI assistant. Powered by the Reactive Cortex Architecture — no cloud, no API keys.</p>
-    <div class="chip-row">
-      <div class="chip" onclick="sendSuggestion('What can you do?')">What can you do?</div>
-      <div class="chip" onclick="sendSuggestion('List available tools')">List available tools</div>
-      <div class="chip" onclick="sendSuggestion('Help me write some code')">Help me write code</div>
-      <div class="chip" onclick="sendSuggestion('Search the web for me')">Search the web</div>
-    </div>
+    <div class="chip-row" id="welcome-chips"></div>
   </div>
 </div>
 
@@ -212,6 +207,28 @@ var _currentMsgId   = null;
 var _currentRawText = "";
 var _msgCounter     = 0;
 var _suggestionCb   = null;   // set by Python via window._suggestionCallback
+
+/* ── Suggestion chips (single source of truth) ── */
+var _SUGGESTIONS = [
+  "What can you do?",
+  "List available tools",
+  "Help me write some code",
+  "Search the web for me",
+];
+
+function _buildChips(container) {
+  container.innerHTML = "";
+  _SUGGESTIONS.forEach(function(s) {
+    var d = document.createElement("div");
+    d.className = "chip";
+    d.textContent = s;
+    d.onclick = function() { sendSuggestion(s); };
+    container.appendChild(d);
+  });
+}
+
+// Populate initial welcome chips on load
+_buildChips(document.getElementById("welcome-chips"));
 
 /* ── Helpers ── */
 function _esc(s) {
@@ -410,14 +427,13 @@ window.clearMessages = function() {
   c.innerHTML = "";
   var w = document.createElement("div");
   w.id = "welcome";
+  var chips = document.createElement("div");
+  chips.className = "chip-row";
+  _buildChips(chips);
   w.innerHTML =
     '<div class="logo">✦</div><h2>Agentic</h2>' +
-    '<p>Your local AI assistant. No cloud, no API keys.</p>' +
-    '<div class="chip-row">' +
-    '<div class="chip" onclick="sendSuggestion(\'What can you do?\')">What can you do?</div>' +
-    '<div class="chip" onclick="sendSuggestion(\'List available tools\')">List available tools</div>' +
-    '<div class="chip" onclick="sendSuggestion(\'Help me write some code\')">Help me write code</div>' +
-    '</div>';
+    '<p>Your local AI assistant. No cloud, no API keys.</p>';
+  w.appendChild(chips);
   c.appendChild(w);
   _currentMsgId = null; _currentRawText = "";
 };

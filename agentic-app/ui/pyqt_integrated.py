@@ -299,8 +299,13 @@ def main() -> None:
     if _QSS_PATH.exists():
         app.setStyleSheet(_QSS_PATH.read_text(encoding="utf-8"))
 
-    # Set default font
-    default_font = QFont("Segoe UI", 10)
+    # Set default font with cross-platform fallbacks
+    default_font = QFont()
+    for family in ("Segoe UI", "Inter", "SF Pro Text", "Helvetica Neue", "Arial"):
+        default_font.setFamily(family)
+        if default_font.exactMatch() or QFontDatabase.hasFamily(family):
+            break
+    default_font.setPointSize(10)
     app.setFont(default_font)
 
     agentic = AgenticQtApp(app)
