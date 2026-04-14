@@ -43,7 +43,15 @@ from utils.logger       import build_logger
 log = build_logger("agentic.pyqt_integrated")
 
 _APP_DIR = Path(__file__).parent.parent
-_QSS_PATH = Path(__file__).parent / "style.qss"
+_UI_DIR  = Path(__file__).parent
+
+
+def _qss_path(theme: str = "dark") -> Path:
+    """Return the QSS file for the requested theme, falling back to dark."""
+    candidate = _UI_DIR / f"style_{theme}.qss"
+    if candidate.exists():
+        return candidate
+    return _UI_DIR / "style.qss"
 
 
 # ---------------------------------------------------------------------------
@@ -174,13 +182,8 @@ class AgenticQtApp:
         # Task panel (subscribes to bridge signals internally)
         self._task_panel.connect_bridge(b)
 
-        # Window close → shut down Cortex
-        self._window.closeEvent = self._on_close
-
-        # Deliberation start → mark busy
-        b.deliberationStart.connect(
-            lambda: self._chat_view.set_status("Working…", busy=True)
-        )
+        # Window close → shut down Cortex (via proper signal, not monkey-patch)
+        self._window.closing.connect(self._on_close)
 
     # ------------------------------------------------------------------
     # Suggestion chip callback
@@ -188,14 +191,12 @@ class AgenticQtApp:
 
     def _install_suggestion_callback(self) -> None:
         """
-        Install a JS function that forwards chip clicks back to Python.
-        We poll a JS variable (_agSuggestion) because QWebChannel isn't
-        needed for this simple one-way trigger.
+        Start a timer that polls the JS variable _agSuggestion and forwards
+        chip clicks back to Python.  The JS variable is set by
+        window._suggestionCallback, which is already installed in
+        ChatViewQt._on_page_loaded on every page load.
         """
         page = self._chat_view._web.page()
-        page.runJavaScript(
-            "window._suggestionCallback = function(t) { window._agSuggestion = t; };"
-        )
 
         def _poll_suggestion() -> None:
             if not self._chat_view._streaming:
@@ -240,10 +241,12 @@ class AgenticQtApp:
 
     def _on_theme_change(self, theme_name: str) -> None:
         cfg.set("theme", theme_name)
-        self._chat_view.append_info(
-            f"Theme changed to '{theme_name}'. "
-            "Restart the app to fully apply the new theme."
-        )
+        # Apply QSS to running app immediately
+        qss = _qss_path(theme_name)
+        if qss.exists():
+            self._qt_app.setStyleSheet(qss.read_text(encoding="utf-8"))
+        # Apply theme to the chat WebEngine view immediately
+        self._chat_view.set_theme(theme_name)
 
     # ------------------------------------------------------------------
     # Post-boot welcome message
@@ -269,7 +272,7 @@ class AgenticQtApp:
     # Shutdown
     # ------------------------------------------------------------------
 
-    def _on_close(self, event: object) -> None:
+    def _on_close(self) -> None:
         log.info("Closing Agentic…")
         if hasattr(self, "_suggestion_timer"):
             self._suggestion_timer.stop()
@@ -278,7 +281,6 @@ class AgenticQtApp:
         if self._store:
             self._store.close()
         lattice.emit_kind(SigKind.APP_CLOSING, {}, source="app")
-        event.accept()  # type: ignore[attr-defined]
 
     def show(self) -> None:
         assert self._window is not None
@@ -311,9 +313,11 @@ def main() -> None:
     app.setOrganizationName("Agentic")
     app.setStyle("Fusion")
 
-    # Load QSS stylesheet
-    if _QSS_PATH.exists():
-        app.setStyleSheet(_QSS_PATH.read_text(encoding="utf-8"))
+    # Load QSS stylesheet (theme-aware)
+    theme = cfg.get("theme", "dark")
+    qss = _qss_path(theme)
+    if qss.exists():
+        app.setStyleSheet(qss.read_text(encoding="utf-8"))
 
     # Set default font with cross-platform fallbacks
     default_font = QFont()

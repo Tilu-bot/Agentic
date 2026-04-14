@@ -137,6 +137,24 @@ html, body {
 .reasoning { font-size: 12px; color: #475569; font-style: italic; margin-bottom: 4px; }
 
 /* ── Markdown: code blocks ── */
+.pre-wrap { position: relative; }
+.copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: #252840;
+  color: #94a3b8;
+  border: 1px solid #2d3149;
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.pre-wrap:hover .copy-btn { opacity: 1; }
+.copy-btn:hover { background: #312e81; color: #c7d2fe; border-color: #4f46e5; }
 pre {
   background: #0d1017;
   border: 1px solid #2d3149;
@@ -158,6 +176,45 @@ code {
   color: #c7d2fe;
   font-size: 93%;
 }
+
+/* ── Light theme overrides ── */
+body.light { background: #f8fafc; color: #1e293b; }
+body.light .msg.user .role-label   { color: #4f46e5; }
+body.light .msg.assistant .role-label { color: #059669; }
+body.light .msg.system .role-label { color: #d97706; }
+body.light .msg.user .bubble {
+  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+  color: #f8fafc;
+}
+body.light .msg.assistant .bubble {
+  background: #f1f5f9;
+  color: #1e293b;
+  border: 1px solid #cbd5e1;
+}
+body.light .msg.system .bubble {
+  background: #ecfdf5;
+  color: #065f46;
+  border-left: 3px solid #10b981;
+}
+body.light .msg.info .bubble { color: #94a3b8; }
+body.light pre { background: #f1f5f9; border-color: #cbd5e1; color: #1e293b; }
+body.light :not(pre) > code { background: #e2e8f0; color: #4338ca; }
+body.light .chip { background: #f1f5f9; border-color: #cbd5e1; color: #475569; }
+body.light .chip:hover { background: #ede9fe; border-color: #6366f1; color: #4338ca; }
+body.light .welcome { color: #94a3b8; }
+body.light .copy-btn { background: #e2e8f0; color: #475569; border-color: #cbd5e1; }
+body.light .copy-btn:hover { background: #ede9fe; color: #4338ca; border-color: #6366f1; }
+body.light h1, body.light h2, body.light h3 { color: #1e293b; }
+body.light strong { color: #1e293b; }
+body.light em { color: #4338ca; }
+body.light a { color: #4f46e5; }
+body.light a:hover { color: #4338ca; }
+body.light blockquote { color: #475569; border-color: #6366f1; }
+body.light th { background: #e2e8f0; color: #475569; }
+body.light td { border-color: #f1f5f9; }
+body.light #welcome { color: #94a3b8; }
+body.light #welcome h2 { color: #475569; }
+body.light #welcome p { color: #94a3b8; }
 
 /* ── Markdown: text ── */
 h1 { font-size: 20px; color: #c7d2fe; margin: 14px 0 6px; }
@@ -230,6 +287,13 @@ function _buildChips(container) {
 // Populate initial welcome chips on load
 _buildChips(document.getElementById("welcome-chips"));
 
+/* ── Event delegation for copy buttons ── */
+document.getElementById("messages").addEventListener("click", function(e) {
+  if (e.target.classList.contains("copy-btn")) {
+    _copyCode(e.target);
+  }
+});
+
 /* ── Helpers ── */
 function _esc(s) {
   return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
@@ -265,21 +329,40 @@ function _inline(t) {
   return t;
 }
 
+function _codeBlock(lang, lines) {
+  var cls = lang ? ' class="language-'+_esc(lang)+'"' : "";
+  return (
+    '<div class="pre-wrap"><pre><code'+cls+'>' +
+    _esc(lines.join("\n")) +
+    '</code></pre><button class="copy-btn">Copy</button></div>'
+  );
+}
+
 function _renderMarkdown(text) {
-  var lines   = text.split("\n");
-  var out     = [];
-  var inCode  = false;
-  var codeLang= "";
-  var codeAcc = [];
-  var inUl    = false;
-  var inOl    = false;
+  var lines      = text.split("\n");
+  var out        = [];
+  var inCode     = false;
+  var codeLang   = "";
+  var codeAcc    = [];
+  var inUl       = false;
+  var inOl       = false;
+  var inTable    = false;
+  var tableRows  = [];
 
   function closeLists() {
     if (inUl) { out.push("</ul>"); inUl = false; }
     if (inOl) { out.push("</ol>"); inOl = false; }
   }
-  function openUl() { if (!inUl) { if(inOl){out.push("</ol>");inOl=false;} out.push("<ul>"); inUl=true; } }
-  function openOl() { if (!inOl) { if(inUl){out.push("</ul>");inUl=false;} out.push("<ol>"); inOl=true; } }
+  function closeTable() {
+    if (inTable) {
+      out.push("<table>" + tableRows.join("") + "</table>");
+      inTable = false;
+      tableRows = [];
+    }
+  }
+  function closeAll() { closeLists(); closeTable(); }
+  function openUl() { if (!inUl) { closeTable(); if(inOl){out.push("</ol>");inOl=false;} out.push("<ul>"); inUl=true; } }
+  function openOl() { if (!inOl) { closeTable(); if(inUl){out.push("</ul>");inUl=false;} out.push("<ol>"); inOl=true; } }
 
   for (var i = 0; i < lines.length; i++) {
     var L = lines[i];
@@ -287,36 +370,43 @@ function _renderMarkdown(text) {
     /* code fence */
     if (L.startsWith("```")) {
       if (!inCode) {
-        closeLists();
+        closeAll();
         inCode = true; codeLang = L.slice(3).trim(); codeAcc = [];
       } else {
         inCode = false;
-        var cls = codeLang ? ' class="language-'+_esc(codeLang)+'"' : "";
-        out.push("<pre><code"+cls+">"+_esc(codeAcc.join("\n"))+"</code></pre>");
+        out.push(_codeBlock(codeLang, codeAcc));
       }
       continue;
     }
     if (inCode) { codeAcc.push(L); continue; }
 
     /* headers */
-    if (L.startsWith("### ")) { closeLists(); out.push("<h3>"+_inline(L.slice(4))+"</h3>"); continue; }
-    if (L.startsWith("## "))  { closeLists(); out.push("<h2>"+_inline(L.slice(3))+"</h2>"); continue; }
-    if (L.startsWith("# "))   { closeLists(); out.push("<h1>"+_inline(L.slice(2))+"</h1>"); continue; }
+    if (L.startsWith("### ")) { closeAll(); out.push("<h3>"+_inline(L.slice(4))+"</h3>"); continue; }
+    if (L.startsWith("## "))  { closeAll(); out.push("<h2>"+_inline(L.slice(3))+"</h2>"); continue; }
+    if (L.startsWith("# "))   { closeAll(); out.push("<h1>"+_inline(L.slice(2))+"</h1>"); continue; }
 
     /* hr */
-    if (/^(-{3,}|\*{3,}|_{3,})$/.test(L.trim())) { closeLists(); out.push("<hr>"); continue; }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(L.trim())) { closeAll(); out.push("<hr>"); continue; }
 
     /* blockquote */
-    if (L.startsWith("> ")) { closeLists(); out.push("<blockquote>"+_inline(L.slice(2))+"</blockquote>"); continue; }
+    if (L.startsWith("> ")) { closeAll(); out.push("<blockquote>"+_inline(L.slice(2))+"</blockquote>"); continue; }
 
-    /* table row (simple) */
+    /* table row */
     if (L.startsWith("|") && L.endsWith("|")) {
       closeLists();
-      /* skip separator rows like |---|---| */
-      if (/^\|[-:| ]+\|$/.test(L)) continue;
+      /* separator row — promote the preceding row's <td> to <th> */
+      if (/^\|[-:| ]+\|$/.test(L)) {
+        if (tableRows.length > 0) {
+          tableRows[tableRows.length - 1] =
+            tableRows[tableRows.length - 1]
+              .replace(/<td>/g, "<th>").replace(/<\/td>/g, "</th>");
+        }
+        continue;
+      }
       var cells = L.slice(1,-1).split("|").map(function(c){ return c.trim(); });
-      var row = cells.map(function(c){ return "<td>"+_inline(c)+"</td>"; }).join("");
-      out.push("<table><tr>"+row+"</tr></table>");
+      var rowHtml = "<tr>" + cells.map(function(c){ return "<td>"+_inline(c)+"</td>"; }).join("") + "</tr>";
+      inTable = true;
+      tableRows.push(rowHtml);
       continue;
     }
 
@@ -328,7 +418,7 @@ function _renderMarkdown(text) {
     var olm = L.match(/^\d+\. (.+)/);
     if (olm) { openOl(); out.push("<li>"+_inline(olm[1])+"</li>"); continue; }
 
-    closeLists();
+    closeAll();
     if (L.trim() === "") {
       out.push("<br>");
     } else {
@@ -336,9 +426,9 @@ function _renderMarkdown(text) {
     }
   }
 
-  closeLists();
+  closeAll();
   if (inCode && codeAcc.length) {
-    out.push("<pre><code>"+_esc(codeAcc.join("\n"))+"</code></pre>");
+    out.push(_codeBlock(codeLang, codeAcc));
   }
   return out.join("");
 }
@@ -457,6 +547,36 @@ window.sendSuggestion = function(text) {
   if (window._suggestionCallback) {
     window._suggestionCallback(text);
   }
+};
+
+/* ── Copy code ── */
+function _copyCode(btn) {
+  var code = btn.parentElement.querySelector("pre code");
+  if (!code) return;
+  var text = code.textContent;
+  function _done() { btn.textContent = "Copied!"; setTimeout(function(){ btn.textContent = "Copy"; }, 1500); }
+  if (navigator && navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(_done).catch(function() {
+      _fallbackCopy(text, _done);
+    });
+  } else {
+    _fallbackCopy(text, _done);
+  }
+}
+
+function _fallbackCopy(text, cb) {
+  var ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed;opacity:0;top:0;left:0;";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); cb(); } catch(e) {}
+  document.body.removeChild(ta);
+}
+
+/* ── Theme switching ── */
+window.setTheme = function(t) {
+  document.body.className = (t === "light") ? "light" : "";
 };
 </script>
 </body>

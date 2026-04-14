@@ -109,7 +109,6 @@ class ChatViewQt(QWidget):
         # ── Top bar ──────────────────────────────────────────────────
         top_bar = QWidget(self)
         top_bar.setObjectName("TopBar")
-        top_bar.setStyleSheet("background:#1a1d27; border-bottom:1px solid #252840;")
         top_bar.setFixedHeight(64)
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(24, 0, 20, 0)
@@ -153,9 +152,7 @@ class ChatViewQt(QWidget):
 
         # ── Composer area ─────────────────────────────────────────────
         composer_outer = QWidget(self)
-        composer_outer.setStyleSheet(
-            "background:#1a1d27; border-top:1px solid #252840;"
-        )
+        composer_outer.setObjectName("ComposerOuter")
         co_layout = QVBoxLayout(composer_outer)
         co_layout.setContentsMargins(20, 12, 20, 12)
         co_layout.setSpacing(8)
@@ -453,6 +450,10 @@ class ChatViewQt(QWidget):
     def set_status(self, text: str, busy: bool = False) -> None:
         self._set_status(text, busy)
 
+    def set_theme(self, theme: str) -> None:
+        """Apply 'dark' or 'light' theme to the embedded chat HTML page."""
+        self._js(f"window.setTheme && window.setTheme({json.dumps(theme)})")
+
     # ------------------------------------------------------------------
     # Model loading progress
     # ------------------------------------------------------------------
@@ -470,6 +471,7 @@ class ChatViewQt(QWidget):
             self._load_hint_shown = False
             self._set_status(f"Loading {short}…", busy=True)
             self.append_info("Initialising model…")
+            self._set_composer_enabled(False)
         elif stage == "download_start":
             self._set_status(f"Downloading {short}…", busy=True)
             self.append_info("Downloading model files…")
@@ -502,10 +504,12 @@ class ChatViewQt(QWidget):
         elif stage == "done":
             self._set_status("Model ready")
             self.append_info(f"✓ Model loaded: {model_id}")
+            self._set_composer_enabled(True)
         elif stage == "error":
             err = payload.get("error", "unknown error")
             self._set_status(f"Model load failed: {err[:60]}")
             self.append_info(f"✗ Model load failed: {err}")
+            self._set_composer_enabled(True)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -537,3 +541,19 @@ class ChatViewQt(QWidget):
         else:
             self._status_lbl.setStyleSheet("color:#475569; font-size:12px; background:transparent;")
         self._status_lbl.setText(text)
+
+    def _set_composer_enabled(self, enabled: bool) -> None:
+        """Enable or disable the entire composer area (used during model loading)."""
+        if not enabled:
+            self._input.setEnabled(False)
+            self._action_btn.setEnabled(False)
+            self._attach_btn.setEnabled(False)
+            self._input.setPlaceholderText("Model is loading, please wait…")
+        else:
+            if not self._streaming:
+                self._input.setEnabled(True)
+                self._action_btn.setEnabled(True)
+                self._attach_btn.setEnabled(True)
+            self._input.setPlaceholderText(
+                "Message Agentic…  (Enter to send, Shift+Enter for new line)"
+            )

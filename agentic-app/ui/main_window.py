@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap, QFont
 from PyQt6.QtWidgets import (
     QFrame,
@@ -45,20 +45,7 @@ _NAV_ITEMS = [
 
 
 class NavButton(QPushButton):
-    """Sidebar navigation button with active/inactive visual states."""
-
-    _INACTIVE = (
-        "QPushButton#NavButton { background-color:transparent; color:#64748b; "
-        "border:none; text-align:left; padding:10px 16px; border-radius:8px; "
-        "font-size:14px; font-weight:500; } "
-        "QPushButton#NavButton:hover { background-color:#252840; color:#e2e8f0; }"
-    )
-    _ACTIVE = (
-        "QPushButton#NavButton { background-color:#312e81; color:#c7d2fe; "
-        "border:none; text-align:left; padding:10px 16px; border-radius:8px; "
-        "font-size:14px; font-weight:600; } "
-        "QPushButton#NavButton:hover { background-color:#3730a3; color:#e0e7ff; }"
-    )
+    """Sidebar navigation button with active/inactive visual states driven by QSS."""
 
     def __init__(self, icon: str, label: str, parent: QWidget | None = None) -> None:
         super().__init__(f"  {icon}  {label}", parent)
@@ -68,7 +55,6 @@ class NavButton(QPushButton):
         self.setActive(False)
 
     def setActive(self, active: bool) -> None:
-        self.setStyleSheet(self._ACTIVE if active else self._INACTIVE)
         self.setProperty("active", "true" if active else "false")
         self.style().unpolish(self)
         self.style().polish(self)
@@ -82,6 +68,8 @@ class MainWindow(QMainWindow):
     TaskPanelQt are created externally (in pyqt_integrated.py) and
     installed via ``install_views()``.
     """
+
+    closing = pyqtSignal()  # emitted before the window is destroyed
 
     def __init__(self) -> None:
         super().__init__()
@@ -183,10 +171,8 @@ class MainWindow(QMainWindow):
 
         # ── Task side panel ───────────────────────────────────────────
         self._task_panel_container = QWidget(central)
+        self._task_panel_container.setObjectName("TaskPanelContainer")
         self._task_panel_container.setFixedWidth(240)
-        self._task_panel_container.setStyleSheet(
-            "background:#0f1117; border-left:1px solid #252840;"
-        )
         self._task_panel_container.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
         )
@@ -247,5 +233,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event: Any) -> None:
-        """Emit a close signal so pyqt_integrated.py can shut down Cortex."""
+        """Emit closing signal so pyqt_integrated.py can shut down Cortex."""
+        self.closing.emit()
         event.accept()
