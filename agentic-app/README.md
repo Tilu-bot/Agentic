@@ -18,7 +18,7 @@ No API keys. No cloud. No server. Everything runs on your own machine.
 | **Three-Tier Memory Lattice** | Fluid (working) → Crystal (episodic) → Bedrock (semantic facts) |
 | **BM25 memory ranking** | Relevant facts are ranked by BM25 score and injected into every prompt |
 | **Multi-model support** | Gemma 3, Llama 3, Mistral, Phi-4, Qwen 2.5 – any HF instruction model |
-| **Autopilot routing** | Classifies task intent, picks model ladder, escalates on failures, and applies a response quality gate |
+| **Task orchestration routing** | Classifies task intent, selects model ladder, escalates on failures, and applies a response quality gate |
 | **Native tool-calling** | Llama 3.1+, Qwen 2.5, Phi-4, Mistral-Nemo use the model's own tool-call format |
 | **100% local inference** | Runs via HuggingFace `transformers`; no API keys, no server needed |
 | **Streaming responses** | Token-by-token display with live progress |
@@ -152,8 +152,11 @@ python main.py
 
 ```bash
 sudo apt update
-sudo apt install python3.11 python3.11-venv python3-pip git -y
+sudo apt install python3.11 python3.11-venv python3-pip git \
+    libgl1 libegl1 libxkbcommon-x11-0 -y
 ```
+
+> These libraries help Qt/WebEngine start reliably on Linux desktops.
 
 **Step 2 – Clone the repository**
 
@@ -238,36 +241,21 @@ cd agentic-app
 python main.py
 ```
 
-### Autopilot routing controls
+### Task orchestration controls
 
-Autopilot is enabled by default and uses config keys stored in your Agentic config file:
+Task orchestration is enabled by default and uses config keys stored in your Agentic config file:
 
-- `autopilot_enabled`
-- `autopilot_fast_model_id`
-- `autopilot_code_model_id`
-- `autopilot_research_model_id`
-- `autopilot_longrun_model_id`
-- `autopilot_fallback_models` (comma-separated)
-- `autopilot_quality_gate_enabled`
-- `autopilot_quality_threshold` (percentage, e.g. `60`)
-- `autopilot_escalation_enabled`
-- `autopilot_escalate_on_error_ratio` (percentage, e.g. `50`)
-- `autopilot_checkpoint_every_n`
-
-### Evaluate routing decisions
-
-Use the built-in evaluator with a JSONL dataset:
-
-```bash
-python eval_router.py --dataset autopilot_eval.jsonl
-```
-
-Dataset format:
-
-```json
-{"query": "fix failing pytest in parser", "expected_task_kind": "coding"}
-{"query": "latest model releases this week", "expected_task_kind": "research"}
-```
+- `orchestration_enabled`
+- `orchestration_fast_model_id`
+- `orchestration_code_model_id`
+- `orchestration_research_model_id`
+- `orchestration_longrun_model_id`
+- `orchestration_fallback_models` (comma-separated)
+- `orchestration_quality_gate_enabled`
+- `orchestration_quality_threshold` (percentage, e.g. `60`)
+- `orchestration_escalation_enabled`
+- `orchestration_escalate_on_error_ratio` (percentage, e.g. `50`)
+- `orchestration_checkpoint_every_n`
 
 ### UI panels
 
@@ -481,20 +469,20 @@ reg_weather()
 
 ## 📦 Building a Standalone App (no Python required)
 
-Agentic uses [PyInstaller](https://pyinstaller.org) to create a self-contained
-executable that does not require Python to be installed on the target machine.
+Agentic uses [PyInstaller](https://pyinstaller.org) to create self-contained
+artifacts for release distribution.
 
 ```bash
 cd agentic-app
-pip install -r requirements.txt   # includes pyinstaller
-pyinstaller agentic.spec
+pip install -r requirements.txt
+# Build using your platform-specific PyInstaller command/workflow
 ```
 
 | Platform | Output path | How to run |
 |----------|-------------|------------|
-| **Windows** | `dist/Agentic/Agentic.exe` | Double-click the `.exe` |
-| **macOS** | `dist/Agentic.app` | Double-click in Finder or `open dist/Agentic.app` |
-| **Linux** | `dist/Agentic/Agentic` | `chmod +x dist/Agentic/Agentic && ./dist/Agentic/Agentic` |
+| **Windows** | release artifact `.exe` | Double-click the `.exe` |
+| **macOS** | release artifact `.app` | Double-click in Finder or `open <app>.app` |
+| **Linux** | release artifact binary | `chmod +x <binary> && ./<binary>` |
 
 > Build on the target OS. PyInstaller does not cross-compile.
 
@@ -518,7 +506,6 @@ Core and integration tests covering: config validation, BM25 memory ranking, pro
 agentic-app/
 ├── main.py                   # Application entry point
 ├── requirements.txt          # All Python dependencies
-├── agentic.spec              # PyInstaller build specification
 ├── assets/
 │   ├── icon.png              # Application icon
 │   └── generate_icon.py      # Icon generator (run once to regenerate)
@@ -526,8 +513,8 @@ agentic-app/
 ├── core/                     # Reactive Cortex Architecture
 │   ├── signal_lattice.py     # Typed reactive event mesh
 │   ├── cortex.py             # Deliberation Pulse + ReAct loop + Reflexion
+│   ├── task_orchestrator.py  # Task intent classification and routing
 │   ├── task_fabric.py        # Parallel TaskFiber execution
-│   ├── task_orchestrator.py  # Autopilot routing + quality gate
 │   ├── memory_lattice.py     # Fluid / Crystal / Bedrock memory + BM25 ranking
 │   └── skill_registry.py     # Skill catalogue; invocation with timeout enforcement
 │
@@ -556,13 +543,13 @@ agentic-app/
 │   ├── store.py              # SQLite store (sessions · crystal · bedrock)
 │   └── session.py            # Session lifecycle manager
 │
-├── tests/                    # Test suite (76 tests)
+├── tests/                    # Test suite
 │   ├── conftest.py           # Shared fixtures and sys.path setup
 │   ├── test_config.py        # Config validation tests
 │   ├── test_memory_lattice.py # BM25, context assembly tests
 │   ├── test_prompt_weaver.py  # Skill-call parsing tests
-│   ├── test_task_orchestrator.py # Routing and quality gate tests
-│   └── test_web_reader.py    # Web fetch / SSRF guard tests
+│   ├── test_task_orchestrator.py # Task routing and quality-gate tests
+│   └── test_web_reader.py    # Web fetch and URL normalization tests
 │
 └── utils/                    # Utilities
     ├── config.py             # Thread-safe JSON config with schema validation
@@ -586,8 +573,8 @@ agentic-app/
 
 ### App window doesn't open
 
-- **Linux:** make sure the required Qt libraries are available. On Ubuntu/Debian: `sudo apt install libgl1 libegl1`
-- **macOS:** if using a Homebrew Python, ensure PyQt6 was installed in the same environment: `pip install PyQt6 PyQt6-WebEngine`
+- **Linux:** install Qt runtime libs: `sudo apt install libgl1 libegl1 libxkbcommon-x11-0`
+- **macOS:** ensure Python has access to Qt frameworks from pip-installed `PyQt6`.
 
 ### "No module named 'transformers'" / import errors
 
