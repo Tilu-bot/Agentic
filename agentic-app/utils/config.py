@@ -33,6 +33,25 @@ _CONFIG_SCHEMA: dict[str, dict] = {
     "react_max_iterations": {"type": int, "min": 1,  "max": 20},
     "context_limit_tokens": {"type": int, "min": 512, "max": 131072},
     "skill_retry_budget":   {"type": int, "min": 0,  "max": 3},
+    "deep_research_enabled": {"type": bool},
+    "deep_research_max_results": {"type": int, "min": 1, "max": 10},
+    "deep_research_max_sources": {"type": int, "min": 1, "max": 8},
+    "deep_research_fetch_chars": {"type": int, "min": 1000, "max": 20000},
+    "deep_research_total_chars": {"type": int, "min": 4000, "max": 60000},
+    "orchestration_enabled": {"type": bool},
+    "orchestration_todo_enabled": {"type": bool},
+    "orchestration_skill_cards_enabled": {"type": bool},
+    "orchestration_skill_card_limit": {"type": int, "min": 1, "max": 12},
+    "orchestration_quality_gate_enabled": {"type": bool},
+    "orchestration_quality_threshold": {"type": int, "min": 10, "max": 95},
+    "orchestration_escalation_enabled": {"type": bool},
+    "orchestration_escalate_on_error_ratio": {"type": int, "min": 10, "max": 100},
+    "orchestration_checkpoint_every_n": {"type": int, "min": 1, "max": 5},
+    "orchestration_fast_model_id": {"type": str},
+    "orchestration_code_model_id": {"type": str},
+    "orchestration_research_model_id": {"type": str},
+    "orchestration_longrun_model_id": {"type": str},
+    "orchestration_fallback_models": {"type": str},
 }
 
 
@@ -114,6 +133,30 @@ _DEFAULT: dict[str, Any] = {
     # returns an error.  0 means no retries (fail immediately).  Each retry
     # uses an exponential back-off delay (0.5 s × attempt).
     "skill_retry_budget": 1,
+    # Automatic pre-fetch research mode for current-events / research queries.
+    # The Cortex performs one search_web call, fetches top pages, and injects
+    # a bounded research brief into the prompt before normal ReAct reasoning.
+    "deep_research_enabled": True,
+    "deep_research_max_results": 8,
+    "deep_research_max_sources": 4,
+    "deep_research_fetch_chars": 5000,
+    "deep_research_total_chars": 18000,
+    # Autopilot routing and quality controls.
+    "autopilot_enabled": True,
+    "autopilot_todo_enabled": True,
+    "autopilot_skill_cards_enabled": True,
+    "autopilot_skill_card_limit": 5,
+    "autopilot_quality_gate_enabled": True,
+    # Stored as integer percentage to keep Config type coercion simple.
+    "autopilot_quality_threshold": 60,
+    "autopilot_escalation_enabled": True,
+    "autopilot_escalate_on_error_ratio": 50,
+    "autopilot_checkpoint_every_n": 1,
+    "autopilot_fast_model_id": "google/gemma-3-1b-it",
+    "autopilot_code_model_id": "Qwen/Qwen2.5-7B-Instruct",
+    "autopilot_research_model_id": "Qwen/Qwen2.5-7B-Instruct",
+    "autopilot_longrun_model_id": "Qwen/Qwen2.5-7B-Instruct",
+    "autopilot_fallback_models": "",
 }
 
 

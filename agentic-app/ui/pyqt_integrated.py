@@ -91,6 +91,7 @@ class AgenticQtApp:
         # Connect sidebar ↔ window switch (expose to chat view for "New Chat")
         self._chat_view.new_session_requested.connect(self._new_session)
         self._chat_view.message_submitted.connect(self._on_user_submit)
+        self._chat_view.stop_requested.connect(self._on_user_stop)
 
         # Wire suggestion chips → chat submit
         self._chat_view._web.loadFinished.connect(self._install_suggestion_callback)
@@ -105,7 +106,9 @@ class AgenticQtApp:
 
         self._store       = Store(db_path)
         self._session_mgr = SessionManager(self._store)
-        self._session_mgr.new_session()
+        restored_id = self._session_mgr.load_most_recent_session()
+        if restored_id is None:
+            restored_id = self._session_mgr.new_session()
 
         # Register skills
         from skills.filesystem import register_all as reg_fs
@@ -134,6 +137,9 @@ class AgenticQtApp:
         self._memory_view._get_memory = (
             lambda: self._session_mgr.memory if self._session_mgr else None
         )
+
+        # Replay persisted conversation turns into the chat view.
+        self._chat_view.hydrate_from_fluid(self._session_mgr.memory.fluid_read())
 
         log.info("Agentic (Qt) bootstrap complete — %d skills registered", self._tools_count)
 
@@ -214,9 +220,13 @@ class AgenticQtApp:
     # User interaction handlers
     # ------------------------------------------------------------------
 
-    def _on_user_submit(self, text: str) -> None:
+    def _on_user_submit(self, text: str, attachments: list[str] | None = None) -> None:
         if self._cortex:
-            self._cortex.submit_input(text)
+            self._cortex.submit_input(text, attachments)
+
+    def _on_user_stop(self) -> None:
+        if self._cortex:
+            self._cortex.cancel_current()
 
     def _new_session(self) -> None:
         assert self._session_mgr is not None and self._cortex is not None
@@ -241,6 +251,12 @@ class AgenticQtApp:
 
     def _post_boot_message(self) -> None:
         model_id = cfg.get("model_id", "unknown")
+        restored_entries = len(self._session_mgr.memory.fluid_read()) if self._session_mgr else 0
+        if restored_entries > 0:
+            self._chat_view.append_info(
+                f"Restored previous session: {restored_entries} message(s) loaded."
+            )
+            return
         self._chat_view.append_system(
             "Welcome to Agentic!\n"
             "Powered by the Reactive Cortex Architecture.\n"

@@ -231,6 +231,7 @@ class ModelNexus:
 
     def __init__(self) -> None:
         self._model_id: str = cfg.get("model_id", "google/gemma-3-1b-it")
+        self._model_override_id: str | None = None
         self._model    = None
         self._tokenizer = None
         self._load_lock = threading.Lock()
@@ -247,9 +248,22 @@ class ModelNexus:
     # Lazy model loading
     # ------------------------------------------------------------------
 
+    def set_model_override(self, model_id: str | None) -> None:
+        """
+        Set a temporary model id override for routing/escalation.
+
+        When set, stream() and lazy loading use this model id instead of the
+        persistent config value. Passing None clears the override.
+        """
+        self._model_override_id = (model_id or "").strip() or None
+
+    def _active_model_id(self) -> str:
+        """Return the effective model id for the next generation call."""
+        return self._model_override_id or cfg.get("model_id", "google/gemma-3-1b-it")
+
     def _ensure_loaded(self) -> None:
         """Load the model synchronously (called from executor thread)."""
-        new_id = cfg.get("model_id", "google/gemma-3-1b-it")
+        new_id = self._active_model_id()
         if self._model is not None and new_id == self._model_id:
             return
         with self._load_lock:
@@ -337,6 +351,10 @@ class ModelNexus:
 
         # Device mapping (only set if not already set by quantization config)
         if "device_map" not in load_kw:
+            cuda_built = bool(
+                getattr(getattr(torch, "backends", None), "cuda", None)
+                and torch.backends.cuda.is_built()
+            )
             if device_pref == "auto":
                 if torch.cuda.is_available():
                     load_kw["device_map"] = "auto"
@@ -344,6 +362,20 @@ class ModelNexus:
                     load_kw["device_map"] = {"": "mps"}
                 else:
                     load_kw["device_map"] = {"": "cpu"}
+                    if not cuda_built:
+                        lattice.emit_kind(
+                            SigKind.MODEL_LOADING,
+                            {
+                                "stage": "device_warning",
+                                "model_id": model_id,
+                                "message": (
+                                    "PyTorch in this environment was installed as a CPU-only "
+                                    "build, so CUDA cannot be detected. Install a CUDA-enabled "
+                                    "PyTorch wheel to use the NVIDIA GPU."
+                                ),
+                            },
+                            source="model_nexus",
+                        )
             else:
                 if device_pref == "cuda" and not torch.cuda.is_available():
                     load_kw["device_map"] = {"": "cpu"}
@@ -354,7 +386,9 @@ class ModelNexus:
                             "model_id": model_id,
                             "message": (
                                 "CUDA requested but not available in this Python "
-                                "environment; falling back to CPU"
+                                "environment. The current PyTorch install appears "
+                                "to be CPU-only, so the app is falling back to CPU. "
+                                "Install a CUDA-enabled PyTorch wheel to use the GPU."
                             ),
                         },
                         source="model_nexus",
@@ -613,6 +647,7 @@ class ModelNexus:
         temperature: float = 0.7,
         max_tokens: int = 2048,
         tools_schema: list[dict] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> AsyncIterator[str]:
         """
         Async generator yielding generated token strings one at a time.
@@ -632,8 +667,9 @@ class ModelNexus:
                           it is passed as ``tools=`` to ``apply_chat_template``
                           so the model produces structured tool-call output.
         """
-        # Force a reload if the user changed the model in Settings.
-        if cfg.get("model_id", "google/gemma-3-1b-it") != self._model_id:
+        # Force a reload if the active model changed in Settings or via
+        # temporary runtime override (autopilot routing/escalation).
+        if self._active_model_id() != self._model_id:
             self._model = None
 
         loop = asyncio.get_running_loop()
@@ -643,11 +679,18 @@ class ModelNexus:
 
         try:
             import torch
-            from transformers import TextIteratorStreamer
+            from transformers import StoppingCriteria, StoppingCriteriaList, TextIteratorStreamer
         except ImportError as exc:
             raise RuntimeError(
                 "transformers is required. Run: pip install transformers torch accelerate"
             ) from exc
+
+        class _CancelStoppingCriteria(StoppingCriteria):
+            def __init__(self, ev: threading.Event) -> None:
+                self._ev = ev
+
+            def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
+                return self._ev.is_set()
 
         # Build conversation using the model's chat template.
         # When the tokenizer supports a native "system" role (detected at load
@@ -708,9 +751,11 @@ class ModelNexus:
             "max_new_tokens": max_tokens,
             "do_sample": temperature > 0.0,
             "temperature": max(float(temperature), 1e-6),
-            "repetition_penalty": 1.15,
-            "no_repeat_ngram_size": 4,
         }
+        if cancel_event is not None:
+            gen_kwargs["stopping_criteria"] = StoppingCriteriaList(
+                [_CancelStoppingCriteria(cancel_event)]
+            )
         gen_kwargs.update(gen_inputs)
 
         lattice.emit_kind(
@@ -745,6 +790,8 @@ class ModelNexus:
         def _drain_streamer() -> None:
             seq = 0
             for text in streamer:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
                 if text:
                     seq += 1
                     lattice.emit_kind(

@@ -4,7 +4,7 @@
 # HuggingFace model inference – runs entirely in-process, no server needed.
 # transformers 4.47+ brings Gemma 3, Llama 3.3, Phi-4, Qwen 2.5 chat templates
 # and improved bfloat16 / flash-attention support.
-transformers>=4.47.0
+transformers>=4.47.0,<5.0.0
 # PyTorch 2.5 adds torch.compile improvements and better MPS (Apple Silicon)
 # support.  2.6 is the latest stable as of early 2026.
 torch>=2.5.0
@@ -18,9 +18,13 @@ accelerate>=1.2.0
 huggingface_hub>=0.27.0
 # Progress bars for model snapshot download percentage updates
 tqdm>=4.67.0
+# Required by some tokenizers/model configs during initialization
+protobuf>=4.25.3,<6
 
 # Async HTTP client for the web-fetch skill
 httpx>=0.28.0
+# Browser-like TLS fingerprint fallback to reduce 403 blocks on strict sites
+curl-cffi>=0.8.0
 # Pillow for optional icon image support
 Pillow>=11.0.0
 # TLS certificate bundle for stable HTTPS verification

@@ -35,7 +35,7 @@ class MemoryView(tk.Frame):
         # Tabs row
         tabs = AgFrame(self, pal)
         tabs.pack(fill="x", padx=pad, pady=(0, M.padding_sm))
-        self._tab_var = tk.StringVar(value="bedrock")
+        self._tab_var = tk.StringVar(value="fluid")
         for label, val in (
             ("Session (Fluid)", "fluid"),
             ("Long-Term Facts (Bedrock)", "bedrock"),

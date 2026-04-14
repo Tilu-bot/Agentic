@@ -171,7 +171,9 @@ class AgenticApp(tk.Tk):
 
         self._store       = Store(db_path)
         self._session_mgr = SessionManager(self._store)
-        self._session_mgr.new_session()
+        restored_id = self._session_mgr.load_most_recent_session()
+        if restored_id is None:
+            restored_id = self._session_mgr.new_session()
 
         # Register skills
         from skills.filesystem import register_all as reg_fs
@@ -228,6 +230,7 @@ class AgenticApp(tk.Tk):
         self._chat_view = ChatView(
             self._main_frame, self._pal,
             on_submit=self._on_user_submit,
+            on_stop=self._on_user_stop,
             on_new_session=self._new_session,
         )
         self._views["chat"] = self._chat_view
@@ -267,6 +270,10 @@ class AgenticApp(tk.Tk):
     def _on_user_submit(self, text: str) -> None:
         if self._cortex:
             self._cortex.submit_input(text)
+
+    def _on_user_stop(self) -> None:
+        if self._cortex:
+            self._cortex.cancel_current()
 
     def _on_token_from_cortex(self, token: str) -> None:
         """Called from the Cortex background thread; route to chat queue."""

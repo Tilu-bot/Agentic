@@ -40,11 +40,13 @@ class ChatView(tk.Frame):
         master: Any,
         pal: Palette,
         on_submit: Callable[[str], None],
+        on_stop: Callable[[], None],
         on_new_session: Callable[[], None],
     ) -> None:
         super().__init__(master, bg=pal.bg_base)
         self._pal = pal
         self._on_submit = on_submit
+        self._on_stop = on_stop
         self._on_new_session = on_new_session
         self._token_queue: queue.Queue[str | None] = queue.Queue()
         self._streaming = False
@@ -211,23 +213,23 @@ class ChatView(tk.Frame):
         )
         self._input.grid(row=0, column=0, sticky="ew", padx=(0, M.padding_sm), ipady=10)
 
-        self._send_btn = tk.Button(
+        self._action_btn = tk.Button(
             composer_shell,
-            text="➤",
-            command=self._submit,
+            text="Send",
+            command=self._on_action_button,
             bg="#0095f6",
             fg="#ffffff",
             activebackground="#0077c2",
             activeforeground="#ffffff",
             relief="flat",
             bd=0,
-            padx=M.padding_sm,
+            padx=M.padding_md,
             pady=M.padding_sm,
             cursor="hand2",
-            font=(FONTS.family_ui, FONTS.size_md, "bold"),
-            width=2,
+            font=(FONTS.family_ui, FONTS.size_sm, "bold"),
+            width=14,
         )
-        self._send_btn.grid(row=0, column=1, padx=(M.padding_sm, 0), pady=0, sticky="e")
+        self._action_btn.grid(row=0, column=1, padx=(M.padding_sm, 0), pady=0, sticky="e")
 
         self._status_lbl = AgLabel(content, pal, text=self._footer_text, muted=True, size=FONTS.size_xs, bg=pal.bg_base)
         self._status_lbl.grid(row=4, column=0, sticky="w", pady=(M.padding_sm, 0))
@@ -238,6 +240,7 @@ class ChatView(tk.Frame):
         self._input.bind("<Down>", self._on_history_down)
         self._input.bind("<FocusIn>", self._on_focus_in)
         self._input.bind("<FocusOut>", self._on_focus_out)
+        self._refresh_action_button()
         self._show_placeholder()
 
     # ------------------------------------------------------------------
@@ -248,6 +251,12 @@ class ChatView(tk.Frame):
         self._submit()
         return "break"   # prevent default newline insertion
 
+    def _on_action_button(self) -> None:
+        if self._streaming:
+            self._stop_stream()
+        else:
+            self._submit()
+
     def _submit(self) -> None:
         if self._placeholder_visible:
             text = ""
@@ -255,6 +264,8 @@ class ChatView(tk.Frame):
             text = self._input.get().strip()
         if not text or self._streaming:
             return
+        self._streaming = True
+        self._is_first_token = True
         self._prompt_history.append(text)
         self._history_index = None
         self._input.delete(0, "end")
@@ -263,22 +274,30 @@ class ChatView(tk.Frame):
         self._set_status("Working...", busy=True)
         self._schedule_thinking_indicator()
         self._request_started_at = time.time()
-        self._streaming = True
-        self._is_first_token = True
         self._on_submit(text)
 
     def _submit_shortcut(self, text: str) -> None:
         if self._streaming:
             return
+        self._streaming = True
+        self._is_first_token = True
         self._prompt_history.append(text)
         self._history_index = None
         self._show_user_message(text)
         self._set_status("Working...", busy=True)
         self._schedule_thinking_indicator()
         self._request_started_at = time.time()
-        self._streaming = True
-        self._is_first_token = True
         self._on_submit(text)
+
+    def _stop_stream(self) -> None:
+        if not self._streaming:
+            return
+        self._set_status("Stopping...", busy=True)
+        self._action_btn.config(state="disabled")
+        try:
+            self._on_stop()
+        except Exception:
+            pass
 
     def _schedule_thinking_indicator(self) -> None:
         self._cancel_thinking_indicator()
@@ -438,10 +457,30 @@ class ChatView(tk.Frame):
     def _set_status(self, text: str, busy: bool = False) -> None:
         colour = self._pal.warn if busy else self._pal.fg_muted
         self._status_lbl.config(text=text if busy else self._footer_text, fg=colour)
-        self._send_btn.config(state="disabled" if busy else "normal")
+        if busy and not self._streaming:
+            self._action_btn.config(state="disabled")
+        elif self._streaming:
+            self._action_btn.config(state="normal")
+        else:
+            self._action_btn.config(state="normal")
+        self._refresh_action_button()
         self._input.config(state="disabled" if busy else "normal")
         if not busy and self._placeholder_visible:
             self._input.config(fg=self._pal.fg_dim)
+
+    def _refresh_action_button(self) -> None:
+        if self._streaming:
+            self._action_btn.config(
+                text="Stop generating",
+                bg="#111827",
+                activebackground="#1f2937",
+            )
+        else:
+            self._action_btn.config(
+                text="Send",
+                bg="#0095f6",
+                activebackground="#0077c2",
+            )
 
     def _show_placeholder(self) -> None:
         self._input.config(state="normal")

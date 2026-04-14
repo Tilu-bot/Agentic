@@ -24,11 +24,12 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QTimer, Qt, QUrl, pyqtSignal
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
+    QFileDialog,
     QLabel,
     QPlainTextEdit,
     QPushButton,
@@ -37,7 +38,24 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-_HTML_PATH = Path(__file__).parent / "chat_web.html"
+def _resolve_ui_asset(filename: str) -> Path:
+    local_path = Path(__file__).parent / filename
+    if local_path.exists():
+        return local_path
+
+    for root in (Path.cwd(), *Path.cwd().parents):
+        for candidate_dir in (
+            root / "ui",
+            root / "agentic-app" / "ui",
+        ):
+            candidate = candidate_dir / filename
+            if candidate.exists():
+                return candidate
+
+    return local_path
+
+
+_HTML_PATH = _resolve_ui_asset("chat_web.html")
 
 
 class ChatViewQt(QWidget):
@@ -51,7 +69,8 @@ class ChatViewQt(QWidget):
     suggestion_clicked(str)  – emitted when a welcome-screen chip is clicked
     """
 
-    message_submitted:     pyqtSignal = pyqtSignal(str)
+    message_submitted:     pyqtSignal = pyqtSignal(str, list)
+    stop_requested:        pyqtSignal = pyqtSignal()
     new_session_requested: pyqtSignal = pyqtSignal()
     suggestion_clicked:    pyqtSignal = pyqtSignal(str)
 
@@ -64,6 +83,8 @@ class ChatViewQt(QWidget):
         self._pending_calls: list[str] = []   # JS calls queued before page load
         self._history:       list[str] = []
         self._history_idx:   int | None = None
+        self._attachments:   list[Path] = []
+        self._action_mode:   str = "send"
         self._load_stage     = ""
         self._load_short     = "model"
         self._load_start_ts  = 0.0
@@ -126,7 +147,7 @@ class ChatViewQt(QWidget):
         self._web.loadFinished.connect(self._on_page_loaded)
         self._web.setHtml(
             _HTML_PATH.read_text(encoding="utf-8"),
-            # baseUrl required so relative paths inside HTML work
+            QUrl.fromLocalFile(str(_HTML_PATH.parent) + "/"),
         )
         root.addWidget(self._web, stretch=1)
 
@@ -156,14 +177,40 @@ class ChatViewQt(QWidget):
         )
         self._input.installEventFilter(self)
 
-        self._send_btn = QPushButton("➤", composer_frame)
-        self._send_btn.setObjectName("SendButton")
-        self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._send_btn.setFixedSize(42, 42)
-        self._send_btn.clicked.connect(self._submit)
+        self._action_btn = QPushButton("➤", composer_frame)
+        self._action_btn.setObjectName("SendButton")
+        self._action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._action_btn.setFixedSize(88, 42)
+        self._action_btn.clicked.connect(self._on_action_clicked)
+
+        self._attach_btn = QPushButton("＋", composer_frame)
+        self._attach_btn.setObjectName("AttachButton")
+        self._attach_btn.setToolTip("Attach files")
+        self._attach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._attach_btn.setFixedSize(42, 42)
+        self._attach_btn.clicked.connect(self._pick_attachments)
 
         cf_layout.addWidget(self._input)
-        cf_layout.addWidget(self._send_btn)
+        cf_layout.addWidget(self._attach_btn)
+        cf_layout.addWidget(self._action_btn)
+
+        self._attachment_row = QWidget(composer_outer)
+        ar_layout = QHBoxLayout(self._attachment_row)
+        ar_layout.setContentsMargins(4, 0, 4, 0)
+        ar_layout.setSpacing(8)
+
+        self._attachment_lbl = QLabel(self._attachment_row)
+        self._attachment_lbl.setObjectName("AttachmentLabel")
+        self._attachment_lbl.setWordWrap(False)
+
+        self._clear_attachments_btn = QPushButton("Clear", self._attachment_row)
+        self._clear_attachments_btn.setObjectName("ClearAttachmentsButton")
+        self._clear_attachments_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clear_attachments_btn.clicked.connect(self._clear_attachments)
+
+        ar_layout.addWidget(self._attachment_lbl, stretch=1)
+        ar_layout.addWidget(self._clear_attachments_btn)
+        self._attachment_row.setVisible(False)
 
         self._status_lbl = QLabel(
             "AI responses can contain errors — please verify important information.",
@@ -173,6 +220,7 @@ class ChatViewQt(QWidget):
         self._status_lbl.setWordWrap(True)
 
         co_layout.addWidget(composer_frame)
+        co_layout.addWidget(self._attachment_row)
         co_layout.addWidget(self._status_lbl)
         root.addWidget(composer_outer)
 
@@ -189,7 +237,7 @@ class ChatViewQt(QWidget):
                 key  = event.key()
                 mods = event.modifiers()
                 if key == Qt.Key.Key_Return and not (mods & Qt.KeyboardModifier.ShiftModifier):
-                    self._submit()
+                    self._on_action_clicked()
                     return True
                 if key == Qt.Key.Key_Up and not self._input.toPlainText():
                     self._history_navigate(-1)
@@ -202,35 +250,103 @@ class ChatViewQt(QWidget):
     # ------------------------------------------------------------------
     # User interaction
     # ------------------------------------------------------------------
+    def _on_action_clicked(self) -> None:
+        if self._streaming:
+            self._request_stop()
+        else:
+            self._submit()
 
     def _submit(self) -> None:
         if self._streaming:
             return
         text = self._input.toPlainText().strip()
-        if not text:
+        if not text and not self._attachments:
             return
-        self._history.append(text)
+        from utils.logger import build_logger
+        log = build_logger("agentic.chat_view")
+        if self._attachments:
+            log.info(f"Submitting message with {len(self._attachments)} attachment(s)")
+        prompt_text = text or "Please review the attached files and help me with them."
+        bubble_text = text or "Attached files"
+        attachments = [str(path) for path in self._attachments]
+        self._history.append(prompt_text)
         self._history_idx = None
         self._input.clear()
-        self._js(f"window.addUserMessage({json.dumps(text)})")
+        self._js(f"window.addUserMessage({json.dumps(bubble_text)})")
         self._streaming = True
-        self._send_btn.setEnabled(False)
+        self._action_mode = "stop"
+        self._refresh_action_button()
+        self._attach_btn.setEnabled(False)
         self._input.setEnabled(False)
         self._set_status("Working…", busy=True)
-        self.message_submitted.emit(text)
+        self._clear_attachments(preserve_ui=False)
+        log.info(f"Emitting message_submitted signal with attachments: {[Path(a).name for a in attachments]}")
+        self.message_submitted.emit(prompt_text, attachments)
 
     def submit_suggestion(self, text: str) -> None:
         """Programmatically submit a suggestion chip click."""
         if self._streaming:
             return
+        attachments = [str(path) for path in self._attachments]
         self._history.append(text)
         self._history_idx = None
         self._js(f"window.addUserMessage({json.dumps(text)})")
         self._streaming = True
-        self._send_btn.setEnabled(False)
+        self._action_mode = "stop"
+        self._refresh_action_button()
+        self._attach_btn.setEnabled(False)
         self._input.setEnabled(False)
         self._set_status("Working…", busy=True)
-        self.message_submitted.emit(text)
+        self._clear_attachments(preserve_ui=False)
+        self.message_submitted.emit(text, attachments)
+
+    def _request_stop(self) -> None:
+        if not self._streaming:
+            return
+        self._action_btn.setEnabled(False)
+        self._set_status("Stopping…", busy=True)
+        self.stop_requested.emit()
+
+    def _pick_attachments(self) -> None:
+        if self._streaming:
+            return
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Attach files",
+            str(Path.home()),
+            "Documents (*.txt *.md *.csv *.json *.yml *.yaml *.py *.pdf *.docx *.xlsx *.pptx);;All Files (*)",
+        )
+        if not files:
+            return
+        from utils.logger import build_logger
+        log = build_logger("agentic.chat_view")
+        log.info(f"File dialog returned {len(files)} file(s)")
+        for file_path in files:
+            path = Path(file_path).expanduser().resolve()
+            if not path.exists():
+                log.warning(f"Selected file does not exist: {path}")
+                continue
+            if path not in self._attachments:
+                log.info(f"Adding attachment: {path.name}")
+                self._attachments.append(path)
+            else:
+                log.info(f"Attachment already added: {path.name}")
+        log.info(f"Total attachments now: {len(self._attachments)}")
+        self._refresh_attachments_ui()
+
+    def _clear_attachments(self, preserve_ui: bool = True) -> None:
+        self._attachments.clear()
+        if preserve_ui:
+            self._refresh_attachments_ui()
+
+    def _refresh_attachments_ui(self) -> None:
+        if not self._attachments:
+            self._attachment_row.setVisible(False)
+            self._attachment_lbl.clear()
+            return
+        names = [path.name for path in self._attachments]
+        self._attachment_lbl.setText("Attached: " + ", ".join(names))
+        self._attachment_row.setVisible(True)
 
     def _history_navigate(self, direction: int) -> None:
         if not self._history:
@@ -240,6 +356,17 @@ class ChatViewQt(QWidget):
         else:
             self._history_idx = max(0, min(len(self._history) - 1, self._history_idx + direction))
         self._input.setPlainText(self._history[self._history_idx])
+
+    def _refresh_action_button(self) -> None:
+        if self._action_mode == "stop":
+            self._action_btn.setText("Stop")
+            self._action_btn.setObjectName("StopButton")
+        else:
+            self._action_btn.setText("➤")
+            self._action_btn.setObjectName("SendButton")
+        self._action_btn.setEnabled(True)
+        self._action_btn.style().unpolish(self._action_btn)
+        self._action_btn.style().polish(self._action_btn)
 
     # ------------------------------------------------------------------
     # Token streaming (called from main thread via Qt signal)
@@ -272,16 +399,14 @@ class ChatViewQt(QWidget):
                 self._js("window.finishStreaming()")
                 self._bubble_open = False
             self._streaming = False
-            self._send_btn.setEnabled(True)
+            self._action_mode = "send"
+            self._refresh_action_button()
+            self._attach_btn.setEnabled(True)
             self._input.setEnabled(True)
             self._input.setFocus()
             self._set_status(
                 "AI responses can contain errors — please verify important information."
             )
-
-    # ------------------------------------------------------------------
-    # System / info messages
-    # ------------------------------------------------------------------
 
     def append_system(self, text: str) -> None:
         self._js(f"window.addSystemMessage({json.dumps(text)})")
@@ -289,13 +414,38 @@ class ChatViewQt(QWidget):
     def append_info(self, text: str) -> None:
         self._js(f"window.addInfoMessage({json.dumps(text)})")
 
+    def append_assistant(self, text: str) -> None:
+        self._js(f"window.addAssistantMessage({json.dumps(text)})")
+
+    def hydrate_from_fluid(self, entries: list[object]) -> None:
+        """Replay persisted fluid memory entries into the chat thread."""
+        if not entries:
+            return
+        self.clear()
+        for entry in entries:
+            role = str(getattr(entry, "role", "")).lower()
+            text = str(getattr(entry, "text", "")).strip()
+            if not text:
+                continue
+            if role == "user":
+                self._js(f"window.addUserMessage({json.dumps(text)})")
+            elif role == "assistant":
+                self.append_assistant(text)
+            elif role in {"system", "skill"}:
+                self.append_system(text)
+            else:
+                self.append_info(text)
+
     def clear(self) -> None:
         self._js("window.clearMessages()")
         self._token_buffer.clear()
         self._bubble_open = False
         self._streaming   = False
-        self._send_btn.setEnabled(True)
+        self._action_mode = "send"
+        self._refresh_action_button()
+        self._attach_btn.setEnabled(True)
         self._input.setEnabled(True)
+        self._clear_attachments()
         self._set_status(
             "AI responses can contain errors — please verify important information."
         )

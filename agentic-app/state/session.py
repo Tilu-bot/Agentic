@@ -57,6 +57,18 @@ class SessionManager:
     def list_sessions(self) -> list[dict]:
         return self._store.session_list()
 
+    def load_most_recent_session(self) -> str | None:
+        """Load the most recently updated session, if one exists."""
+        sessions = self._store.session_list(limit=1)
+        if not sessions:
+            return None
+        session_id = sessions[0].get("id", "")
+        if not session_id:
+            return None
+        if self.load_session(session_id):
+            return session_id
+        return None
+
     def delete_session(self, session_id: str) -> None:
         self._store.session_delete(session_id)
         if self._active_id == session_id:

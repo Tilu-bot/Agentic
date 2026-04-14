@@ -18,11 +18,12 @@ No API keys. No cloud. No server. Everything runs on your own machine.
 | **Three-Tier Memory Lattice** | Fluid (working) → Crystal (episodic) → Bedrock (semantic facts) |
 | **BM25 memory ranking** | Relevant facts are ranked by BM25 score and injected into every prompt |
 | **Multi-model support** | Gemma 3, Llama 3, Mistral, Phi-4, Qwen 2.5 – any HF instruction model |
+| **Autopilot routing** | Classifies task intent, picks model ladder, escalates on failures, and applies a response quality gate |
 | **Native tool-calling** | Llama 3.1+, Qwen 2.5, Phi-4, Mistral-Nemo use the model's own tool-call format |
 | **100% local inference** | Runs via HuggingFace `transformers`; no API keys, no server needed |
 | **Streaming responses** | Token-by-token display with live progress |
 | **9 built-in skills** | File I/O, web fetching, Python execution, memory ops, PDF/Excel/Word/PowerPoint reading |
-| **Desktop App** | Native window (tkinter), packaged with PyInstaller – no browser needed |
+| **Desktop App** | Native window (PyQt6 integrated), packaged with PyInstaller – no browser needed |
 | **Persistent sessions** | SQLite-backed history; sessions survive restarts |
 
 ---
@@ -240,6 +241,37 @@ cd agentic-app
 python main.py
 ```
 
+### Autopilot routing controls
+
+Autopilot is enabled by default and uses config keys stored in your Agentic config file:
+
+- `autopilot_enabled`
+- `autopilot_fast_model_id`
+- `autopilot_code_model_id`
+- `autopilot_research_model_id`
+- `autopilot_longrun_model_id`
+- `autopilot_fallback_models` (comma-separated)
+- `autopilot_quality_gate_enabled`
+- `autopilot_quality_threshold` (percentage, e.g. `60`)
+- `autopilot_escalation_enabled`
+- `autopilot_escalate_on_error_ratio` (percentage, e.g. `50`)
+- `autopilot_checkpoint_every_n`
+
+### Evaluate routing decisions
+
+Use the built-in evaluator with a JSONL dataset:
+
+```bash
+python eval_router.py --dataset autopilot_eval.jsonl
+```
+
+Dataset format:
+
+```json
+{"query": "fix failing pytest in parser", "expected_task_kind": "coding"}
+{"query": "latest model releases this week", "expected_task_kind": "research"}
+```
+
 ### UI panels
 
 | Panel | What it shows |
@@ -417,7 +449,7 @@ Then set `quantize_4bit` to `true` in Settings.  Halves VRAM usage for large mod
 2. Subclass `SkillBase` and implement `async execute(**kwargs)`.
 3. Set class attributes: `name`, `description`, `parameters`, `required`, `tags`.
 4. Add a `register_all()` function that calls `YourSkill.register()`.
-5. Import and call `register_all()` inside `_bootstrap()` in `ui/app.py`.
+5. Import and call `register_all()` inside `_bootstrap()` in `ui/pyqt_integrated.py`.
 
 **Example – a simple weather skill:**
 
@@ -441,7 +473,7 @@ def register_all() -> None:
     WeatherSkill.register()
 ```
 
-In `ui/app.py` inside `_bootstrap()`:
+In `ui/pyqt_integrated.py` inside `_bootstrap()`:
 
 ```python
 from skills.weather import register_all as reg_weather
@@ -479,7 +511,7 @@ pip install pytest          # if not already installed
 python -m pytest tests/ -v
 ```
 
-76 tests covering: config validation, BM25 memory ranking, prompt assembly, and skill-call parsing.
+Core and integration tests covering: config validation, BM25 memory ranking, prompt assembly, skill-call parsing, and frontend/backend smoke checks.
 
 ---
 
@@ -513,14 +545,14 @@ agentic-app/
 │   ├── memory_ops.py         # save_fact · recall_facts · recall_history
 │   └── doc_reader.py         # read_pdf · read_excel · read_word · read_pptx
 │
-├── ui/                       # Desktop GUI (tkinter)
-│   ├── app.py                # Main window, layout, bootstrap
-│   ├── chat_view.py          # Streaming chat panel
-│   ├── task_panel.py         # Live TaskFiber monitor
-│   ├── settings_view.py      # Configuration panel
-│   ├── memory_view.py        # Memory browser (all three tiers)
-│   ├── components.py         # Reusable themed widgets
-│   └── theme.py              # Colour palettes & typography
+├── ui/                       # Frontend (PyQt6 standardized)
+│   ├── pyqt_integrated.py    # Frontend bootstrap + backend wiring
+│   ├── main_window.py        # Main shell and navigation
+│   ├── chat_view_qt.py       # Streaming chat panel
+│   ├── task_panel_qt.py      # Live TaskFiber monitor
+│   ├── settings_view_qt.py   # Configuration panel
+│   ├── memory_view_qt.py     # Memory browser (all three tiers)
+│   └── qt_bridge.py          # Thread-safe bridge from signals to Qt UI
 │
 ├── state/                    # Persistence layer
 │   ├── store.py              # SQLite store (sessions · crystal · bedrock)

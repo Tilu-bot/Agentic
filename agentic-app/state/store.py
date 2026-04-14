@@ -157,6 +157,10 @@ class Store:
                     record.importance,
                 ),
             )
+            self._conn.execute(
+                "UPDATE sessions SET updated_at=? WHERE id=?",
+                (time.time(), record.session_id),
+            )
 
     def crystal_query(
         self,
@@ -265,6 +269,10 @@ class Store:
                 "(entry_id, session_id, role, text, tags, ts) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (entry_id, session_id, role, text, json.dumps(tags), ts),
+            )
+            self._conn.execute(
+                "UPDATE sessions SET updated_at=? WHERE id=?",
+                (time.time(), session_id),
             )
 
     def fluid_restore(self, session_id: str) -> list[dict[str, Any]]:

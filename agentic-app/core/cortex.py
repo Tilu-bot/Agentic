@@ -30,8 +30,10 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+from pathlib import Path
 from typing import Callable
 
+from core.task_orchestrator import build_plan, format_plan_block, quality_gate
 from core.memory_lattice import MemoryLattice
 from core.signal_lattice import SigKind, Signal, lattice
 from core.skill_registry import SkillRegistry
@@ -80,6 +82,15 @@ _TOOLS_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Queries likely to benefit from autonomous multi-source web research.
+_RESEARCH_QUERY_RE = re.compile(
+    r"(latest|today|current|news|breaking|update|new\s+developments|"
+    r"research|analy[sz]e|compare\s+sources|what\s+happened)",
+    re.IGNORECASE,
+)
+
+_URL_RE = re.compile(r"https?://[^\s)]+", re.IGNORECASE)
+
 
 def _fmt_error(exc: BaseException) -> str:
     """Return a non-empty error string for UI-safe reporting."""
@@ -87,6 +98,121 @@ def _fmt_error(exc: BaseException) -> str:
     if msg:
         return msg
     return f"{type(exc).__name__}: {exc!r}"
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n... [truncated at {limit} chars]"
+
+
+def _read_attachment_text(path: Path, max_chars: int = 12000) -> str:
+    """Read an attached file into prompt-safe text."""
+    if not path.exists():
+        from utils.logger import build_logger
+        log = build_logger("agentic.cortex")
+        log.warning(f"Attachment file missing: {path}")
+        return f"(Attachment not found: {path.name})"
+    if not path.is_file():
+        from utils.logger import build_logger
+        log = build_logger("agentic.cortex")
+        log.warning(f"Attachment is not a regular file: {path}")
+        return f"(Not a file: {path.name})"
+
+    suffix = path.suffix.lower()
+    try:
+        file_size = path.stat().st_size
+        from utils.logger import build_logger
+        log = build_logger("agentic.cortex")
+        log.debug(f"Reading attachment: {path.name} ({file_size} bytes, type: {suffix})")
+        if suffix in {".txt", ".md", ".py", ".json", ".csv", ".yml", ".yaml", ".toml", ".ini", ".log"}:
+            return _truncate_text(path.read_text(encoding="utf-8", errors="replace"), max_chars)
+
+        if suffix == ".pdf":
+            from pypdf import PdfReader
+
+            reader = PdfReader(str(path))
+            parts: list[str] = []
+            for index, page in enumerate(reader.pages, start=1):
+                page_text = page.extract_text() or ""
+                if page_text.strip():
+                    parts.append(f"--- Page {index} ---\n{page_text.strip()}")
+            return _truncate_text("\n\n".join(parts) or "(No extractable text found)", max_chars)
+
+        if suffix == ".docx":
+            from docx import Document
+
+            document = Document(str(path))
+            parts = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+            table_parts: list[str] = []
+            for table in document.tables:
+                rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+                if rows:
+                    header = rows[0]
+                    markdown_rows = ["| " + " | ".join(header) + " |", "| " + " | ".join(["---"] * len(header)) + " |"]
+                    for row in rows[1:]:
+                        markdown_rows.append("| " + " | ".join(row) + " |")
+                    table_parts.append("\n".join(markdown_rows))
+            return _truncate_text("\n\n".join(parts + table_parts) or "(No extractable text found)", max_chars)
+
+        if suffix == ".xlsx":
+            import openpyxl
+
+            workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+            parts: list[str] = []
+            for sheet_name in workbook.sheetnames:
+                worksheet = workbook[sheet_name]
+                rows = []
+                for row in worksheet.iter_rows(values_only=True, max_row=50):
+                    rows.append([str(cell) if cell is not None else "" for cell in row])
+                if not rows:
+                    continue
+                header = rows[0]
+                markdown_rows = ["| " + " | ".join(header) + " |", "| " + " | ".join(["---"] * len(header)) + " |"]
+                for row in rows[1:]:
+                    markdown_rows.append("| " + " | ".join(row) + " |")
+                parts.append(f"### Sheet: {sheet_name}\n" + "\n".join(markdown_rows))
+            workbook.close()
+            return _truncate_text("\n\n".join(parts) or "(No extractable text found)", max_chars)
+
+        if suffix == ".pptx":
+            from pptx import Presentation
+
+            presentation = Presentation(str(path))
+            parts: list[str] = []
+            for slide_index, slide in enumerate(presentation.slides, start=1):
+                slide_text = [shape.text.strip() for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip()]
+                if slide_text:
+                    parts.append(f"--- Slide {slide_index} ---\n" + "\n".join(slide_text))
+            return _truncate_text("\n\n".join(parts) or "(No extractable text found)", max_chars)
+
+        return _truncate_text(path.read_text(encoding="utf-8", errors="replace"), max_chars)
+    except Exception as exc:
+        return f"(Could not extract text from {path.name}: {exc})"
+
+
+def _build_attachment_context(attachments: list[str]) -> str:
+    if not attachments:
+        return ""
+
+    import logging
+    log = logging.getLogger("agentic.cortex")
+    log.info(f"Building attachment context for {len(attachments)} files")
+    
+    parts: list[str] = ["== Attached Files =="]
+    for raw_path in attachments:
+        path = Path(raw_path).expanduser().resolve()
+        if not path.exists():
+            log.warning(f"Attachment file not found: {path}")
+        else:
+            log.info(f"Including attachment: {path.name}")
+        parts.append(f"[File: {path.name}]")
+        parts.append(f"Path: {path}")
+        parts.append(_read_attachment_text(path))
+        parts.append("")
+    result = "\n".join(parts).strip()
+    log.info(f"Attachment context built: {len(result)} chars")
+    return result
 
 
 class Cortex:
@@ -121,10 +247,149 @@ class Cortex:
         # submitted while deliberation is in progress are queued rather than
         # silently dropped.  _consume_inputs() drains the queue one item at a
         # time, ensuring deliberations are strictly serialised.
-        # The queue accepts ``str | None``; a ``None`` sentinel is pushed by
+        # The queue accepts ``tuple[str, list[str]] | None``; a ``None`` sentinel is pushed by
         # ``stop()`` to wake the consumer and trigger a clean exit without
         # relying on a 1-second polling timeout.
-        self._input_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._input_queue: asyncio.Queue[tuple[str, list[str]] | None] = asyncio.Queue()
+        self._cancel_current = threading.Event()
+
+    async def _stream_tokens(
+        self,
+        messages: list[dict],
+        system_prompt: str,
+        temperature: float,
+        max_tokens: int,
+        tools_schema: list[dict] | None,
+    ):
+        """
+        Stream tokens from ModelNexus with compatibility fallback.
+
+        Some runtime bundles may still have an older ModelNexus.stream()
+        signature without ``cancel_event``. In that case, retry without the
+        argument so deliberation continues instead of crashing.
+        """
+        try:
+            async for token in self._nexus.stream(
+                messages,
+                system=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools_schema=tools_schema,
+                cancel_event=self._cancel_current,
+            ):
+                yield token
+        except TypeError as exc:
+            msg = _fmt_error(exc)
+            if "unexpected keyword argument 'cancel_event'" not in msg:
+                raise
+            log.warning(
+                "ModelNexus.stream() has no cancel_event support in this runtime; "
+                "falling back to legacy stream signature."
+            )
+            async for token in self._nexus.stream(
+                messages,
+                system=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools_schema=tools_schema,
+            ):
+                yield token
+
+    def _is_research_query(self, text: str) -> bool:
+        return bool(_RESEARCH_QUERY_RE.search(text))
+
+    @staticmethod
+    def _extract_urls(text: str) -> list[str]:
+        urls = _URL_RE.findall(text)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            cleaned = url.rstrip('.,;]')
+            if cleaned not in seen:
+                seen.add(cleaned)
+                deduped.append(cleaned)
+        return deduped
+
+    async def _build_auto_research_context(self, query: str) -> str:
+        """
+        Proactively gather web evidence for research/news requests.
+
+        This stage runs before the regular ReAct loop so the model starts
+        with concrete source material instead of only link titles.
+        """
+        if not cfg.get("deep_research_enabled", True):
+            return ""
+        if not self._is_research_query(query):
+            return ""
+
+        max_results = int(cfg.get("deep_research_max_results", 8))
+        max_sources = int(cfg.get("deep_research_max_sources", 4))
+        fetch_chars = int(cfg.get("deep_research_fetch_chars", 5000))
+        total_chars = int(cfg.get("deep_research_total_chars", 18000))
+
+        lattice.emit_kind(
+            SigKind.NOTIFICATION,
+            {"message": "Deep research: gathering sources…"},
+            source="cortex",
+        )
+
+        search_result = await self._registry.invoke(
+            "search_web", query=query, max_results=max_results
+        )
+        if not search_result.success:
+            log.warning("Deep research search failed: %s", search_result.error)
+            return ""
+
+        candidate_urls = self._extract_urls(str(search_result.output))
+        if not candidate_urls:
+            return ""
+
+        # Fetch from a larger candidate pool so a few blocked domains (403/429)
+        # do not starve the model of source context.
+        fetch_pool = candidate_urls[: max(max_sources * 2, max_sources)]
+
+        async def _fetch(url: str) -> tuple[str, str, bool]:
+            result = await self._registry.invoke("fetch_web", url=url, max_chars=fetch_chars)
+            if result.success:
+                return url, str(result.output), True
+            return url, f"ERROR: {result.error}", False
+
+        fetched = await asyncio.gather(*[_fetch(url) for url in fetch_pool])
+
+        parts: list[str] = [
+            "== Auto Research Brief ==",
+            f"Query: {query}",
+            f"Sources scanned: {len(fetch_pool)}",
+            "",
+        ]
+        used_chars = sum(len(p) for p in parts)
+        success_count = 0
+        for idx, (url, text, ok) in enumerate(fetched, start=1):
+            block = [
+                f"[Source {idx}] {url}",
+                "Status: ok" if ok else "Status: error",
+                _truncate_text(text, fetch_chars),
+                "",
+            ]
+            block_text = "\n".join(block)
+            if used_chars + len(block_text) > total_chars:
+                break
+            parts.append(block_text)
+            used_chars += len(block_text)
+            if ok:
+                success_count += 1
+            if success_count >= max_sources:
+                break
+
+        if len(parts) <= 4:
+            return ""
+
+        lattice.emit_kind(
+            SigKind.NOTIFICATION,
+            {"message": f"Deep research: analyzed {len(fetch_pool)} source(s)."},
+            source="cortex",
+        )
+        return "\n".join(parts).strip()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -161,7 +426,7 @@ class Cortex:
     # Public entry point (called from UI thread)
     # ------------------------------------------------------------------
 
-    def submit_input(self, text: str) -> None:
+    def submit_input(self, text: str, attachments: list[str] | None = None) -> None:
         """
         Submit user input for processing.
 
@@ -170,8 +435,14 @@ class Cortex:
         When more than one message is already waiting, the user is notified via
         the signal lattice so they know their message is queued.
         """
-        if not text.strip():
+        if not text.strip() and not attachments:
             return
+        
+        # Log attachment submission
+        if attachments:
+            log.info(f"submit_input received {len(attachments)} attachments: {[Path(a).name for a in attachments]}")
+        
+        payload = (text, attachments[:] if attachments else [])
         queue_size = self._input_queue.qsize()
         if queue_size > 0:
             lattice.emit_kind(
@@ -180,7 +451,11 @@ class Cortex:
                 source="cortex",
             )
         # put_nowait is safe: the queue is unbounded and this is a fast O(1) op.
-        self._loop.call_soon_threadsafe(self._input_queue.put_nowait, text)
+        self._loop.call_soon_threadsafe(self._input_queue.put_nowait, payload)
+
+    def cancel_current(self) -> None:
+        """Request cancellation for the currently running model generation."""
+        self._cancel_current.set()
 
     # ------------------------------------------------------------------
     # Deliberation Pulse
@@ -203,41 +478,28 @@ class Cortex:
                 log.debug("Cortex input consumer received shutdown sentinel")
                 break
             try:
-                await self._deliberate_inner(item)
+                user_text, attachments = item
+                await self._deliberate_inner(user_text, attachments)
             except Exception as exc:
                 log.exception("Unhandled deliberation error: %s", exc)
 
-    async def _deliberate_inner(self, user_text: str) -> None:
-        """
-        ReAct deliberation loop: Reason → Act → Observe → Reason … → Answer.
-
-        Each iteration:
-          1. Stream a model response.
-          2. Extract any skill-call markers from that response.
-          3. If skill calls are found → run them in parallel (Act), build an
-             Observation message from the results, append both turns to the
-             conversation, and loop (Reason again with new context).
-          4. If no skill calls are found → this is the Final Answer.  Stop.
-
-        The loop is bounded by ``react_max_iterations`` (default 6) to prevent
-        runaway execution.  The final answer (last iteration's response) is
-        written to the Memory Lattice and broadcast via DELIBERATION_END.
-        """
+    async def _deliberate_inner(self, user_text: str, attachments: list[str] | None = None) -> None:
+        """Run one end-to-end deliberation pulse for a queued user input."""
         log.info("Deliberation pulse: '%s'", user_text[:80])
+        self._cancel_current.clear()
 
-        # ── 0. Signal that deliberation has begun ────────────────────────
         lattice.emit_kind(
             SigKind.DELIBERATION_START,
             {"input": user_text[:200]},
             source="cortex",
         )
 
-        # ── 1. Write user input to fluid memory ─────────────────────────
-        self._memory.fluid_write("user", user_text)
+        attachment_block = _build_attachment_context(attachments or [])
+        memory_text = user_text
+        if attachment_block:
+            memory_text = f"{user_text}\n\n{attachment_block}" if user_text.strip() else attachment_block
+        self._memory.fluid_write("user", memory_text)
 
-        # ── 1a. Grounded tools-overview path ───────────────────────────
-        # For capability questions, bypass free-form generation and answer
-        # directly from the registered skill specs.
         if self._is_tools_query(user_text):
             final_response = self._build_tools_overview()
             if self._on_token:
@@ -245,38 +507,49 @@ class Cortex:
                     self._on_token(final_response)
                 except Exception:
                     pass
-
             self._memory.fluid_write("assistant", final_response)
             lattice.emit_kind(
                 SigKind.DELIBERATION_END,
                 {"response": final_response, "skills_used": 0},
                 source="cortex",
             )
-            log.info("Deliberation complete (grounded tools overview)")
             return
 
-        # ── 2. Assemble context, ranked by query relevance ───────────────
         mem_ctx = self._memory.assemble_context(
             include_crystal=5, include_bedrock=10, query=user_text
         )
-
-        # ── 3. Build initial system prompt + message list ────────────────
         system_prompt = self._weaver.build_system(memory_context=mem_ctx)
-        fluid         = self._memory.fluid_read()
-        messages      = self._weaver.build_messages(fluid[:-1], user_text)
+        fluid = self._memory.fluid_read()
+        messages = self._weaver.build_messages(fluid[:-1], user_text)
 
-        # ── 4. Resolve tool schema for models that support native calling ─
+        if attachment_block:
+            messages.insert(len(messages) - 1, {"role": "user", "content": attachment_block})
+
+        research_block = await self._build_auto_research_context(user_text)
+        if research_block:
+            messages.insert(len(messages) - 1, {"role": "user", "content": research_block})
+
+        specs = self._registry.all_specs()
+        autopilot_enabled = bool(cfg.get("autopilot_enabled", True))
+        current_model = cfg.get("model_id", "google/gemma-3-1b-it")
+        plan = build_plan(
+            user_text,
+            specs,
+            current_model=current_model,
+            has_attachments=bool(attachments),
+        )
+
+        if autopilot_enabled:
+            route_block = format_plan_block(plan)
+            if route_block:
+                messages.insert(len(messages) - 1, {"role": "user", "content": route_block})
+
         tools: list[dict] | None = (
             self._registry.tools_schema()
             if self._nexus.tool_calls_supported
             else None
         )
 
-        # ── 4b. Context-window overflow enforcement ───────────────────────
-        # Estimate the total prompt token count using a chars/token heuristic.
-        # When approaching the model's context limit, trim the oldest messages
-        # to fit within the limit and notify the user.  A warning notification
-        # is still emitted so the user knows context was shortened.
         context_limit: int = cfg.get("context_limit_tokens", 4096)
         estimated_tokens = self._estimate_tokens(messages, system_prompt)
         if estimated_tokens > context_limit * _CONTEXT_WARN_RATIO:
@@ -295,177 +568,208 @@ class Cortex:
                 trimmed,
                 estimated_tokens,
             )
-            lattice.emit_kind(
-                SigKind.NOTIFICATION,
-                {
-                    "message": (
-                        f"Context window was nearly full (~{estimated_tokens} tokens / "
-                        f"{context_limit} limit). "
-                        + (
-                            f"{trimmed} oldest message(s) were removed to fit. "
-                            if trimmed
-                            else ""
-                        )
-                        + "Consider starting a new chat session if important context was lost."
-                    )
-                },
-                source="cortex",
-            )
 
         max_iterations = cfg.get("react_max_iterations", 6)
+        if autopilot_enabled and plan.long_horizon:
+            max_iterations = min(20, max_iterations + 2)
         generation_temperature = float(cfg.get("generation_temperature", 0.25))
         generation_max_tokens = int(cfg.get("generation_max_tokens", 512))
+
         final_response = ""
         total_skills_used = 0
+        total_skill_failures = 0
 
-        # ── 5. ReAct loop ────────────────────────────────────────────────
-        for iteration in range(max_iterations):
-            log.info(
-                "ReAct iteration %d/%d for '%s'",
-                iteration + 1, max_iterations, user_text[:40],
-            )
+        model_candidates = plan.model_candidates if autopilot_enabled else [current_model]
+        model_idx = 0
+        current_route_model = model_candidates[model_idx]
+        checkpoint_every = int(cfg.get("autopilot_checkpoint_every_n", 1))
+        escalate_enabled = bool(cfg.get("autopilot_escalation_enabled", True))
+        escalate_ratio = float(cfg.get("autopilot_escalate_on_error_ratio", 50)) / 100.0
 
-            # Stream one model response
-            response_parts: list[str] = []
-            scan_buf = ""
+        self._nexus.set_model_override(current_route_model)
 
-            try:
-                async for token in self._nexus.stream(
-                    messages,
-                    system=system_prompt,
-                    temperature=generation_temperature,
-                    max_tokens=generation_max_tokens,
-                    tools_schema=tools,
-                ):
-                    response_parts.append(token)
-                    scan_buf += token
+        try:
+            for iteration in range(max_iterations):
+                response_parts: list[str] = []
 
+                try:
+                    async for token in self._stream_tokens(
+                        messages,
+                        system_prompt,
+                        generation_temperature,
+                        generation_max_tokens,
+                        tools,
+                    ):
+                        response_parts.append(token)
+                        if self._on_token:
+                            try:
+                                self._on_token(token)
+                            except Exception:
+                                pass
+                        if self._cancel_current.is_set():
+                            break
+                except Exception as exc:
+                    err_text = _fmt_error(exc)
+                    log.exception("Model stream failed: %s", err_text)
+                    err_msg = f"\n[Model error: {err_text}]"
+                    response_parts.append(err_msg)
                     if self._on_token:
-                        try:
-                            self._on_token(token)
-                        except Exception:
-                            pass
+                        self._on_token(err_msg)
 
-            except Exception as exc:
-                err_text = _fmt_error(exc)
-                log.exception("Model stream failed: %s", err_text)
-                err_msg = f"\n[Model error: {err_text}]"
-                if self._on_token:
-                    self._on_token(err_msg)
-                response_parts.append(err_msg)
+                full_response = "".join(response_parts)
+                if self._cancel_current.is_set():
+                    final_response = full_response if full_response else "Response stopped by user."
+                    break
 
-            full_response = "".join(response_parts)
-            final_response = full_response
+                final_response = full_response
+                skill_queue = self._weaver.extract_skill_calls(full_response)
+                if not skill_queue:
+                    break
 
-            # Extract skill calls from the entire iteration response
-            skill_queue = self._weaver.extract_skill_calls(full_response)
+                results = await self._run_skills(skill_queue)
+                total_skills_used += len(skill_queue)
+                failures = sum(1 for _, _, ok in results if not ok)
+                total_skill_failures += failures
 
-            if not skill_queue:
-                # No tool calls → final answer reached
-                log.info(
-                    "ReAct: no tool calls in iteration %d – final answer",
-                    iteration + 1,
+                lattice.emit_kind(
+                    SigKind.REACT_ITERATION,
+                    {
+                        "iteration": iteration + 1,
+                        "skills_run": [inv.skill_name for inv in skill_queue],
+                        "result_count": len(results),
+                        "model": current_route_model,
+                    },
+                    source="cortex",
                 )
-                break
 
-            # ── Act: run skill fibers in parallel ────────────────────────
-            results = await self._run_skills(skill_queue)
-            total_skills_used += len(skill_queue)
+                if autopilot_enabled and ((iteration + 1) % checkpoint_every == 0):
+                    cp_text = (
+                        f"task={plan.task_kind}; iter={iteration + 1}; "
+                        f"model={current_route_model}; skills={len(skill_queue)}; "
+                        f"failures={failures}"
+                    )
+                    self._memory.bedrock_write("autopilot_checkpoint", cp_text, confidence=0.55)
 
+                if self._on_token and iteration + 1 < max_iterations:
+                    skill_names = ", ".join(inv.skill_name for inv in skill_queue)
+                    try:
+                        self._on_token(_REACT_ITERATION_STATUS.format(skill_names=skill_names))
+                    except Exception:
+                        pass
+
+                if (
+                    autopilot_enabled
+                    and escalate_enabled
+                    and len(skill_queue) > 0
+                    and (failures / len(skill_queue)) >= escalate_ratio
+                    and (model_idx + 1) < len(model_candidates)
+                ):
+                    model_idx += 1
+                    current_route_model = model_candidates[model_idx]
+                    self._nexus.set_model_override(current_route_model)
+
+                asst_role = get_assistant_role(current_route_model)
+                messages.append({"role": asst_role, "content": full_response})
+                obs_text = self._weaver.format_observations(results)
+                messages.append({"role": "user", "content": obs_text})
+            else:
+                asst_role = get_assistant_role(current_route_model)
+                messages.append({"role": asst_role, "content": final_response})
+                messages.append({"role": "user", "content": _REFLEXION_PROMPT})
+                if self._on_token:
+                    try:
+                        self._on_token(_REFLEXION_STATUS)
+                    except Exception:
+                        pass
+                reflect_parts: list[str] = []
+                try:
+                    async for token in self._stream_tokens(
+                        messages,
+                        system_prompt,
+                        generation_temperature,
+                        generation_max_tokens,
+                        None,
+                    ):
+                        reflect_parts.append(token)
+                        if self._on_token:
+                            try:
+                                self._on_token(token)
+                            except Exception:
+                                pass
+                        if self._cancel_current.is_set():
+                            break
+                except Exception as exc:
+                    log.exception("Reflexion stream failed: %s", exc)
+                    reflect_parts.append(f"\n[Reflexion error: {exc}]")
+                if reflect_parts:
+                    final_response = "".join(reflect_parts)
+
+            if (
+                autopilot_enabled
+                and bool(cfg.get("autopilot_quality_gate_enabled", True))
+                and (model_idx + 1) < len(model_candidates)
+            ):
+                gate = quality_gate(
+                    final_response,
+                    query=user_text,
+                    tool_calls=total_skills_used,
+                    skill_failures=total_skill_failures,
+                )
+                if not gate.passed:
+                    model_idx += 1
+                    current_route_model = model_candidates[model_idx]
+                    self._nexus.set_model_override(current_route_model)
+                    asst_role = get_assistant_role(current_route_model)
+                    messages.append({"role": asst_role, "content": final_response})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Quality gate requested a cleaner final response. "
+                                "Provide a direct, complete answer now with no tool calls."
+                            ),
+                        }
+                    )
+                    upgrade_parts: list[str] = []
+                    try:
+                        async for token in self._stream_tokens(
+                            messages,
+                            system_prompt,
+                            generation_temperature,
+                            generation_max_tokens,
+                            None,
+                        ):
+                            upgrade_parts.append(token)
+                            if self._on_token:
+                                try:
+                                    self._on_token(token)
+                                except Exception:
+                                    pass
+                    except Exception as exc:
+                        log.exception("Quality fallback stream failed: %s", exc)
+                    if upgrade_parts:
+                        final_response = "".join(upgrade_parts)
+
+            if not final_response:
+                final_response = (
+                    "Error: the model did not generate a response. "
+                    "Please try again or rephrase your input."
+                )
+
+            self._memory.fluid_write("assistant", final_response)
             lattice.emit_kind(
-                SigKind.REACT_ITERATION,
+                SigKind.DELIBERATION_END,
                 {
-                    "iteration":   iteration + 1,
-                    "skills_run":  [inv.skill_name for inv in skill_queue],
-                    "result_count": len(results),
+                    "response": final_response,
+                    "skills_used": total_skills_used,
+                    "skill_failures": total_skill_failures,
+                    "model": current_route_model,
+                    "task_kind": plan.task_kind,
                 },
                 source="cortex",
             )
-            log.info(
-                "ReAct iteration %d: ran %d skills",
-                iteration + 1, len(skill_queue),
-            )
-
-            # Notify the streaming UI that tools have been executed and the
-            # model is about to continue reasoning.
-            if self._on_token and iteration + 1 < max_iterations:
-                skill_names = ", ".join(inv.skill_name for inv in skill_queue)
-                try:
-                    self._on_token(
-                        _REACT_ITERATION_STATUS.format(skill_names=skill_names)
-                    )
-                except Exception:
-                    pass
-
-            # ── Observe: append tool call + observation to message history ─
-            asst_role = get_assistant_role(cfg.get("model_id", ""))
-            messages.append({"role": asst_role, "content": full_response})
-            obs_text = self._weaver.format_observations(results)
-            messages.append({"role": "user", "content": obs_text})
-
-        else:
-            log.warning(
-                "ReAct: reached max iterations (%d) — triggering Reflexion step",
-                max_iterations,
-            )
-            # ── Reflexion (Shinn et al., 2023) ───────────────────────────
-            # The loop exhausted all iterations without reaching a final answer
-            # (every iteration ended with tool calls).  Rather than returning
-            # the last tool-call response verbatim, we do one extra no-tool
-            # generation pass so the model synthesises its findings into a
-            # coherent direct answer.
-            asst_role = get_assistant_role(cfg.get("model_id", ""))
-            messages.append({"role": asst_role, "content": final_response})
-            messages.append({"role": "user", "content": _REFLEXION_PROMPT})
-            if self._on_token:
-                try:
-                    self._on_token(_REFLEXION_STATUS)
-                except Exception:
-                    pass
-            reflect_parts: list[str] = []
-            try:
-                async for token in self._nexus.stream(
-                    messages,
-                    system=system_prompt,
-                    temperature=generation_temperature,
-                    max_tokens=generation_max_tokens,
-                    tools_schema=None,  # force direct answer, no tool calls
-                ):
-                    reflect_parts.append(token)
-                    if self._on_token:
-                        try:
-                            self._on_token(token)
-                        except Exception:
-                            pass
-            except Exception as exc:
-                log.exception("Reflexion stream failed: %s", exc)
-                reflect_parts.append(f"\n[Reflexion error: {exc}]")
-            if reflect_parts:
-                final_response = "".join(reflect_parts)
-
-        # Guard against a completely empty response (e.g. the model emitted
-        # zero tokens and no exception was raised).  This is extremely rare
-        # but we must not write an empty assistant turn to fluid memory.
-        if not final_response:
-            final_response = (
-                "Error: the model did not generate a response. "
-                "Please try again or rephrase your input."
-            )
-            log.warning("ReAct: final_response is empty, substituting placeholder")
-
-        # ── 6. Write final answer to fluid memory ────────────────────────
-        self._memory.fluid_write("assistant", final_response)
-
-        # ── 7. Signal deliberation complete ──────────────────────────────
-        lattice.emit_kind(
-            SigKind.DELIBERATION_END,
-            {"response": final_response, "skills_used": total_skills_used},
-            source="cortex",
-        )
-        log.info(
-            "Deliberation complete (%d skills, %d chars)",
-            total_skills_used, len(final_response),
-        )
+        finally:
+            self._nexus.set_model_override(None)
 
     def _is_tools_query(self, text: str) -> bool:
         return bool(_TOOLS_QUERY_RE.search(text))

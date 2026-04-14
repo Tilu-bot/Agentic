@@ -40,7 +40,7 @@ class MemoryViewQt(QWidget):
     ) -> None:
         super().__init__(parent)
         self._get_memory = get_memory or (lambda: None)
-        self._active_tab = "bedrock"
+        self._active_tab = "fluid"
         self._build_ui()
         self._refresh()
 

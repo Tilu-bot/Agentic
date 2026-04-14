@@ -33,6 +33,7 @@ Skill invocation protocol:
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,6 +44,9 @@ from utils.config import cfg
 _SYSTEM_TEMPLATE = """\
 You are Agentic, a multi-task AI assistant powered by the Reactive Cortex Architecture.
 You think carefully, act step-by-step, and use available skills when needed.
+Always identify yourself as Agentic. Do not claim to be Microsoft, OpenAI, Google, or any other vendor unless the user explicitly asks about the underlying model or provider.
+
+Current date: {current_date}
 
 {skills_block}
 
@@ -64,6 +68,8 @@ Choose whichever format is clearest for the skill call:
 Only invoke skills when necessary. You may invoke multiple skills in one response.
 Wait for skill results before concluding your answer.
 When the user asks for latest/current/up-to-date/online information, call relevant web skills first before giving conclusions.
+For current news requests, do not stop at search result titles. Fetch the top relevant pages and summarize the actual article content or headline facts with sources and dates when available.
+Never claim to be unable to access current information if web skills are available.
 
 == Core Principles ==
 - Be honest about what you know and don't know.
@@ -143,6 +149,7 @@ class PromptWeaver:
         if memory_context.strip():
             memory_block = f"== Memory Context ==\n{memory_context}"
         return _SYSTEM_TEMPLATE.format(
+            current_date=datetime.now().strftime("%Y-%m-%d"),
             skills_block=self._skills_manifest,
             memory_block=memory_block,
         ).strip()
