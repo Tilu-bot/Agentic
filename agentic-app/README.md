@@ -152,11 +152,8 @@ python main.py
 
 ```bash
 sudo apt update
-sudo apt install python3.11 python3.11-venv python3-pip git \
-    python3-tk tk-dev -y
+sudo apt install python3.11 python3.11-venv python3-pip git -y
 ```
-
-> `python3-tk` and `tk-dev` are required for the tkinter desktop window.
 
 **Step 2 – Clone the repository**
 
@@ -530,6 +527,7 @@ agentic-app/
 │   ├── signal_lattice.py     # Typed reactive event mesh
 │   ├── cortex.py             # Deliberation Pulse + ReAct loop + Reflexion
 │   ├── task_fabric.py        # Parallel TaskFiber execution
+│   ├── task_orchestrator.py  # Autopilot routing + quality gate
 │   ├── memory_lattice.py     # Fluid / Crystal / Bedrock memory + BM25 ranking
 │   └── skill_registry.py     # Skill catalogue; invocation with timeout enforcement
 │
@@ -562,7 +560,9 @@ agentic-app/
 │   ├── conftest.py           # Shared fixtures and sys.path setup
 │   ├── test_config.py        # Config validation tests
 │   ├── test_memory_lattice.py # BM25, context assembly tests
-│   └── test_prompt_weaver.py  # Skill-call parsing tests
+│   ├── test_prompt_weaver.py  # Skill-call parsing tests
+│   ├── test_task_orchestrator.py # Routing and quality gate tests
+│   └── test_web_reader.py    # Web fetch / SSRF guard tests
 │
 └── utils/                    # Utilities
     ├── config.py             # Thread-safe JSON config with schema validation
@@ -586,8 +586,8 @@ agentic-app/
 
 ### App window doesn't open
 
-- **Linux:** make sure `python3-tk` is installed: `sudo apt install python3-tk tk-dev`
-- **macOS:** if using a Homebrew Python, run: `brew install python-tk@3.11`
+- **Linux:** make sure the required Qt libraries are available. On Ubuntu/Debian: `sudo apt install libgl1 libegl1`
+- **macOS:** if using a Homebrew Python, ensure PyQt6 was installed in the same environment: `pip install PyQt6 PyQt6-WebEngine`
 
 ### "No module named 'transformers'" / import errors
 

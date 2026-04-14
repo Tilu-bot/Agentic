@@ -6,10 +6,14 @@ A local AI assistant desktop application that runs open-source LLMs entirely in-
 
 - **Fully local inference** — models run on your machine via HuggingFace `transformers`
 - **Multi-model support** — Gemma, Llama, Mistral, Phi, and Qwen model families
-- **Parallel task execution** — skills run concurrently as TaskFibers
-- **Built-in skills** — filesystem, code runner, web fetch, memory operations
-- **Persistent memory** — conversation history saved across sessions
-- **Cross-platform** — Windows, macOS, and Linux via Tkinter
+- **ReAct + Reflexion loop** — up to 6 reasoning–action iterations with auto-synthesis on exhaustion
+- **Autopilot routing** — classifies task intent, picks a model ladder, and applies a response quality gate
+- **Parallel task execution** — skills run concurrently as TaskFibers with dependency tracking
+- **Three-tier memory** — Fluid (RAM) → Crystal (episodic SQLite) → Bedrock (BM25-ranked semantic facts)
+- **9 built-in skills** — filesystem, code runner, web fetch, memory ops, PDF/Excel/Word/PowerPoint reading
+- **Native tool-calling** — Llama 3.1+, Qwen 2.5, Phi-4, and Mistral-Nemo use the model's own format
+- **Persistent sessions** — SQLite-backed history that survives restarts
+- **Cross-platform desktop app** — Windows, macOS, and Linux via PyQt6
 
 ## Supported Models
 
@@ -49,54 +53,65 @@ python main.py
 Agentic uses a **Reactive Cortex Architecture (RCA)**:
 
 ```
-User input
+User Input
     │
     ▼
 Signal Lattice (event bus)
     │
     ▼
-Cortex (async reasoning loop, background thread)
-    ├── MemoryLattice  — retrieves conversation context
-    ├── PromptWeaver   — builds system prompt with skill manifest
+TaskOrchestrator — classifies intent, routes model ladder, quality gate
+    │
+    ▼
+Cortex (ReAct loop, up to 6 iterations + Reflexion synthesis)
+    ├── MemoryLattice  — Fluid / Crystal / Bedrock (BM25-ranked)
+    ├── PromptWeaver   — builds system prompt; parses 4 skill-call formats
     ├── ModelNexus     — streams tokens from the local HF model
-    └── TaskFabric     — dispatches @@SKILL:...@@ markers as parallel TaskFibers
+    └── TaskFabric     — dispatches skill calls as parallel TaskFibers
             │
             ▼
-        SkillRegistry  — filesystem · code runner · web fetch · memory ops
+        SkillRegistry  — filesystem · code runner · web fetch · memory ops · document reader
 ```
 
-Results are injected back into the stream and the completed exchange is persisted to memory.
+Results are injected back into the reasoning loop, and the completed exchange is persisted to the Memory Lattice.
 
 ## Project Structure
 
 ```
 agentic-app/
-├── main.py              # Entry point
+├── main.py                   # Entry point (launches PyQt6 UI)
+├── requirements.txt          # All Python dependencies
 ├── core/
-│   ├── cortex.py        # Central reasoning loop
-│   ├── memory_lattice.py
-│   ├── signal_lattice.py
-│   ├── skill_registry.py
-│   └── task_fabric.py
+│   ├── cortex.py             # ReAct loop + Reflexion synthesis
+│   ├── memory_lattice.py     # Fluid / Crystal / Bedrock + BM25 ranking
+│   ├── signal_lattice.py     # Typed reactive event bus
+│   ├── skill_registry.py     # Skill catalogue with per-skill timeouts
+│   ├── task_fabric.py        # Parallel TaskFiber execution
+│   └── task_orchestrator.py  # Autopilot routing + quality gate
 ├── model/
-│   ├── gemma_nexus.py   # ModelNexus — HuggingFace inference + streaming
-│   └── prompt_weaver.py
+│   ├── gemma_nexus.py        # ModelNexus — multi-family HF inference + streaming
+│   └── prompt_weaver.py      # Prompt assembly + skill-call parser
 ├── skills/
-│   ├── filesystem.py
-│   ├── code_runner.py
-│   ├── web_reader.py
-│   └── memory_ops.py
-├── ui/
-│   ├── app.py           # Main window (sidebar + chat + task panel)
-│   ├── chat_view.py
-│   ├── settings_view.py
-│   └── theme.py
+│   ├── base.py               # Abstract SkillBase
+│   ├── filesystem.py         # read_file · write_file · list_directory
+│   ├── code_runner.py        # run_python (AST sandbox + subprocess)
+│   ├── web_reader.py         # fetch_web (SSRF-protected)
+│   ├── memory_ops.py         # save_fact · recall_facts · recall_history
+│   └── doc_reader.py         # read_pdf · read_excel · read_word · read_pptx
+├── ui/                       # PyQt6 frontend
+│   ├── pyqt_integrated.py    # Bootstrap + backend wiring
+│   ├── main_window.py        # Main shell and navigation
+│   ├── chat_view_qt.py       # Streaming chat panel
+│   ├── task_panel_qt.py      # Live TaskFiber monitor
+│   ├── settings_view_qt.py   # Configuration panel
+│   ├── memory_view_qt.py     # Memory browser (all three tiers)
+│   └── qt_bridge.py          # Thread-safe signal-to-Qt bridge
 ├── state/
-│   ├── session.py
-│   └── store.py
+│   ├── session.py            # Session lifecycle manager
+│   └── store.py              # SQLite store
+├── tests/                    # Test suite
 └── utils/
-    ├── config.py
-    └── logger.py
+    ├── config.py             # Thread-safe JSON config
+    └── logger.py             # Rotating file + console logger
 ```
 
 ## Building a Distributable
