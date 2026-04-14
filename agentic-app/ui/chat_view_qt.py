@@ -452,8 +452,7 @@ class ChatViewQt(QWidget):
 
     def set_theme(self, theme: str) -> None:
         """Apply 'dark' or 'light' theme to the embedded chat HTML page."""
-        import json as _json
-        self._js(f"window.setTheme && window.setTheme({_json.dumps(theme)})")
+        self._js(f"window.setTheme && window.setTheme({json.dumps(theme)})")
 
     # ------------------------------------------------------------------
     # Model loading progress

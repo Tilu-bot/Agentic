@@ -287,6 +287,13 @@ function _buildChips(container) {
 // Populate initial welcome chips on load
 _buildChips(document.getElementById("welcome-chips"));
 
+/* ── Event delegation for copy buttons ── */
+document.getElementById("messages").addEventListener("click", function(e) {
+  if (e.target.classList.contains("copy-btn")) {
+    _copyCode(e.target);
+  }
+});
+
 /* ── Helpers ── */
 function _esc(s) {
   return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
@@ -327,7 +334,7 @@ function _codeBlock(lang, lines) {
   return (
     '<div class="pre-wrap"><pre><code'+cls+'>' +
     _esc(lines.join("\n")) +
-    '</code></pre><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>'
+    '</code></pre><button class="copy-btn">Copy</button></div>'
   );
 }
 
@@ -543,7 +550,7 @@ window.sendSuggestion = function(text) {
 };
 
 /* ── Copy code ── */
-window.copyCode = function(btn) {
+function _copyCode(btn) {
   var code = btn.parentElement.querySelector("pre code");
   if (!code) return;
   var text = code.textContent;
@@ -555,7 +562,7 @@ window.copyCode = function(btn) {
   } else {
     _fallbackCopy(text, _done);
   }
-};
+}
 
 function _fallbackCopy(text, cb) {
   var ta = document.createElement("textarea");
