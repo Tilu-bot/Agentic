@@ -58,7 +58,7 @@ class SettingsViewQt(QWidget):
 
         # ── Top bar ──────────────────────────────────────────────────
         top_bar = QWidget(self)
-        top_bar.setStyleSheet("background:#1a1d27; border-bottom:1px solid #252840;")
+        top_bar.setObjectName("TopBar")
         top_bar.setFixedHeight(64)
         tb_layout = QHBoxLayout(top_bar)
         tb_layout.setContentsMargins(24, 0, 24, 0)

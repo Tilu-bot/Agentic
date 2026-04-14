@@ -125,7 +125,7 @@ class TaskPanelQt(QWidget):
 
         # ── Header ───────────────────────────────────────────────────
         header = QWidget(self)
-        header.setStyleSheet("background:#1a1d27; border-bottom:1px solid #252840;")
+        header.setObjectName("PanelHeader")
         header.setFixedHeight(48)
         h_layout = QHBoxLayout(header)
         h_layout.setContentsMargins(16, 0, 16, 0)
