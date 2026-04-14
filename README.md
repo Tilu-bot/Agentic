@@ -9,7 +9,7 @@ A local AI assistant desktop application that runs open-source LLMs entirely in-
 - **Parallel task execution** — skills run concurrently as TaskFibers
 - **Built-in skills** — filesystem, code runner, web fetch, memory operations
 - **Persistent memory** — conversation history saved across sessions
-- **Cross-platform** — Windows, macOS, and Linux via Tkinter
+- **Cross-platform** — Windows, macOS, and Linux via PyQt6
 
 ## Supported Models
 
@@ -56,6 +56,7 @@ Signal Lattice (event bus)
     │
     ▼
 Cortex (async reasoning loop, background thread)
+    ├── TaskOrchestrator — classifies requests and selects routing strategy
     ├── MemoryLattice  — retrieves conversation context
     ├── PromptWeaver   — builds system prompt with skill manifest
     ├── ModelNexus     — streams tokens from the local HF model
@@ -77,20 +78,24 @@ agentic-app/
 │   ├── memory_lattice.py
 │   ├── signal_lattice.py
 │   ├── skill_registry.py
-│   └── task_fabric.py
+│   ├── task_fabric.py
+│   └── task_orchestrator.py
 ├── model/
 │   ├── gemma_nexus.py   # ModelNexus — HuggingFace inference + streaming
 │   └── prompt_weaver.py
 ├── skills/
+│   ├── base.py
 │   ├── filesystem.py
 │   ├── code_runner.py
 │   ├── web_reader.py
-│   └── memory_ops.py
+│   ├── memory_ops.py
+│   └── doc_reader.py
 ├── ui/
-│   ├── app.py           # Main window (sidebar + chat + task panel)
-│   ├── chat_view.py
-│   ├── settings_view.py
-│   └── theme.py
+│   ├── pyqt_integrated.py  # Frontend bootstrap + backend wiring
+│   ├── chat_view_qt.py
+│   ├── task_panel_qt.py
+│   ├── settings_view_qt.py
+│   └── memory_view_qt.py
 ├── state/
 │   ├── session.py
 │   └── store.py
@@ -101,44 +106,17 @@ agentic-app/
 
 ## Building a Distributable
 
-### Windows — Single Installer `.exe` (recommended)
+### Recommended for non-technical users
 
-Produces `installer/Agentic-Setup.exe` — a wizard-based installer that handles
-installation directory, Start Menu entry, Desktop shortcut, and an uninstaller,
-just like any standard Windows application.
+Publish prebuilt binaries in GitHub Releases so users can download and run without
+installing Python or dependencies.
 
-**Prerequisites:**
-1. Python 3.11+ on PATH
-2. [Inno Setup 6](https://jrsoftware.org/isdl.php) (free, installs to default path)
+### Maintainer packaging workflow
 
-**Build:**
-```bat
-cd agentic-app
-build_installer.bat
-```
+1. Build on the target OS (Windows for `.exe`, macOS for `.app`, Linux for ELF).
+2. Use PyInstaller to package the app from `agentic-app/`.
+3. Upload produced artifacts to a tagged GitHub Release.
 
-The script automatically:
-1. Installs Python dependencies
-2. Generates `assets/icon.ico`
-3. Bundles the app with PyInstaller → `dist/Agentic/`
-4. Compiles the Inno Setup script → `installer/Agentic-Setup.exe`
-
-Distribute **`installer/Agentic-Setup.exe`** to users. Double-clicking it
-starts the installation wizard.
-
-### Portable Bundle (all platforms)
-
-Produces `dist/Agentic/` — a folder containing `Agentic.exe` and its
-dependencies. No installation required; copy the folder anywhere and run
-`Agentic.exe`.
-
-```bash
-cd agentic-app
-pyinstaller agentic.spec
-```
-
-### macOS `.app` Bundle
-
-Running the same `pyinstaller agentic.spec` command on macOS additionally
-produces `dist/Agentic.app` which can be dragged to `/Applications`.
+This repository intentionally keeps source and runtime code clean; installer helper
+scripts are not required for end-user installation.
 
