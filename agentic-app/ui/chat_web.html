@@ -359,6 +359,21 @@ window.addUserMessage = function(text) {
   _scroll();
 };
 
+window.addAssistantMessage = function(text) {
+  _hideWelcome();
+  _msgCounter++;
+  var id = "msg-" + _msgCounter;
+  var div = document.createElement("div");
+  div.className = "msg assistant";
+  div.id = id;
+  div.innerHTML =
+    '<div class="meta"><span class="role-label">Agentic</span></div>' +
+    '<div class="bubble">' + _renderMarkdown(text || "") + '</div>' +
+    '<div class="ts">' + _ts() + '</div>';
+  document.getElementById("messages").appendChild(div);
+  _scroll();
+};
+
 window.beginAssistantMessage = function() {
   _hideWelcome();
   _currentRawText = "";
